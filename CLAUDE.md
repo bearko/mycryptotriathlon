@@ -15,7 +15,7 @@
 - 陸の難度は `land.ts` の `PACE_MIN`・`PACE_SPAN`・ライバルの `dps`・関門の `need`。変えたら、自動操縦で順位を確かめる（下のデバッグ用 URL）。目安：強化なしで 30〜45 位、中盤まで育てて 20 位台。
 - デバッグ用の URL（どこからもリンクしない）：`?stage=land|sea|sky`（その種目から）、`&bot=1`（自動操縦）、`&quick=1`（紹介を飛ばす）、`&speed=3`（早送り）、`&tree=atk:5,speed:3`（そのスキルツリーで始める。本物のセーブには触らない）、`&ce=300&medal=5`、`&heroes=id,id,id`。結果は `window.__log`。
 - チェック：`npm test`・`npm run typecheck`・`npm run build`。
-- PC とスマホ横持ちの両方で遊べること（スマホは左に仮想スティック、右に A・B）。ボタンは 44px 以上、ドット絵は `image-rendering: pixelated`。画面を直したら 1280×720 と 844×390 で重なりを確かめる。
+- PC とスマホ横持ちの両方で遊べること（スマホは左に仮想スティック、右に A・B）。ボタンは 44px 以上、ドット絵は `image-rendering: pixelated`。画面を直したら 1280×720・844×390・900×330（スマホ横持ちでブラウザのバーが出ている大きさ）で重なりを確かめる。
 - 陸は前へ自動で走り、プレイヤーは上下だけを操作する（`land.ts` の `heroControl`）。関門の手前（`FREE_ZONE`）だけは自動前進が止まり、上下左右に自由に動ける。宝箱パネルはコースを横切る縦一列（`CHEST_ROW` 枚）で、取られても `CHEST_BACK` 秒で戻る。リンク共有用の画像は `public/og.png`（1200×630）。強化はレベルアップのカード選択（`screens.ts` の `levelUpScreen`、選ぶあいだは `arena.picking` でレース全体が止まる）。宝箱パネルのお助けエクステンションは `land.ts` の `useItem`・`stepItems`。妨害するものは必ず `reflects`（鏡）を通す。
 - 陸の順位はゴールライン（`len`）を越えたときに決まる。最後の関門はその `LAST_RUN` 手前。ゴール後は `outro`（`arena.ts`）になり、時計を止めたまま `afterglow` でヒーローが走り続け、`main.ts` が `goalScreen` を出す（押すと次へ）。`?quick=1` のときは待たずに進む。
 - レベルアップのカードは、押すのをやめて少し待つまで選べない（`levelUpScreen` の `armed`）。連打対策なので外さない。
