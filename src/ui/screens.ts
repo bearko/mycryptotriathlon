@@ -44,9 +44,9 @@ const RULES: Record<StageId, { goal: string; pc: string; touch: string }> = {
     touch: '前へは自動。スティックで上下 ／ A ダッシュ ／ B ストライク（審判の円の中は反則） ／ 右上のアイコンでお助けエクステンション',
   },
   sea: {
-    goal: '遺物を掘り出して門を開き、深海の主を倒して秘宝を手に入れろ',
-    pc: '移動 WASD ／ 銛 Space・クリック ／ 宝のそばで自動で発掘',
-    touch: '左スティックで移動 ／ A で銛 ／ 宝のそばで自動で発掘',
+    goal: '30組中、先着10組だけが秘宝を手にできる。深さごとの遺物を自分で掘り出して門を抜け、最深部へ',
+    pc: '移動 WASD ／ 銛 Space・クリック（審判の円の中でライバルに当てると反則） ／ 遺物・秘宝のそばで自動で発掘',
+    touch: '左スティックで移動 ／ A で銛（審判の円の中でライバルに当てると反則） ／ 遺物・秘宝のそばで自動で発掘',
   },
   sky: {
     goal: '集めたエクステンションの戦闘機で、宇宙の果てまで飛べ',
@@ -477,10 +477,10 @@ export function outScreen(stage: StageId, res: StageResult, pay: Payout): Promis
   const el = open(`outrace ${stage}`, `
     <div class="out-box">
       <p class="fin">${STAGE_NAME[stage]}・予選</p>
-      <h2>${res.progress >= 1 ? '通過ならず…' : '時間切れ！'}</h2>
+      <h2>${res.progress >= 1 ? '通過ならず…' : stage === 'sea' ? '秘宝が尽きた！' : '時間切れ！'}</h2>
       <p class="place"><b>${res.place}</b>位 <small>/ ${res.field}組（通過は ${res.quota}位まで）</small></p>
-      <div class="howfar"><i style="width:${res.progress * 100}%"></i><u style="left:${m.bestProgress * 100}%"></u></div>
-      <p class="left">${res.progress >= 1 ? 'ゴールはできた。あとは順位だ' : `ゴールまで あと ${left}m`}</p>
+      <div class="howfar"><i style="width:${res.progress * 100}%"></i>${stage === 'land' ? `<u style="left:${m.bestProgress * 100}%"></u>` : ''}</div>
+      <p class="left">${res.progress >= 1 ? 'ゴールはできた。あとは順位だ' : stage === 'sea' ? (res.progress > 0.9 ? '秘宝まで、あと一歩だった' : `最深部まで あと ${Math.round((1 - res.progress) * 420)}m`) : `ゴールまで あと ${left}m`}</p>
       <ul class="pay">${pay.lines.map((l) => `<li><span>${l.label}</span><b>+${l.ce}</b></li>`).join('')}
         ${pay.mult !== 1 ? `<li class="mul"><span>賞金アップ</span><b>×${pay.mult.toFixed(2)}</b></li>` : ''}
         <li class="sum"><span><img src="${cat.icons.ce}" alt=""> 獲得 CE</span><b>+${pay.total}</b></li>
@@ -501,6 +501,32 @@ export function outScreen(stage: StageId, res: StageResult, pay: Payout): Promis
 
 // ------------------------------------------------------------------ level up
 /** Three cards (or four); one is taken. The race holds still meanwhile. Keys 1-4 also pick. */
+/** Over the finished race (which keeps running behind it): the place, large, and the way on. */
+export function goalScreen(stage: StageId, index: number, run: Run, res: StageResult, time: number): Promise<void> {
+  sample('win', 0.5);
+  const next = index < 2 ? run.heroes[index + 1] : null;
+  const el = open(`goal ${stage}`, `
+    <div class="goal-top">
+      <p class="goal-fin">GOAL!</p>
+      <p class="goal-place"><b>${res.place}</b><span>位</span></p>
+      <p class="goal-sub">${res.field}組中 ／ 通過は ${res.quota}位まで　<em>${STAGE_NAME[stage]} ${fmtTime(time)}</em></p>
+    </div>
+    <div class="goal-bottom">
+      ${next ? `<p class="baton">バトンタッチ ▶ <img src="${next.img}" alt=""> ${next.name}</p>` : ''}
+      <button class="btn big" id="g-next" disabled>次のステージへ進む</button>
+    </div>`);
+  return new Promise((r) => {
+    const btn = el.querySelector<HTMLButtonElement>('#g-next')!;
+    // the button wakes a moment later, so a press meant for the race does not skip the finish
+    window.setTimeout(() => (btn.disabled = false), 1200);
+    btn.addEventListener('click', () => {
+      sfx('ui');
+      close(el);
+      r();
+    });
+  });
+}
+
 export function levelUpScreen(run: Run, auto: boolean): Promise<void> {
   const shown = new Set<string>();
   let cards = drawCards(run);
@@ -514,7 +540,7 @@ export function levelUpScreen(run: Run, auto: boolean): Promise<void> {
     return Promise.resolve();
   }
   sample('chest', 0.5);
-  const el = open('levelup', '<div class="lu-box"><p class="lu-head"></p><div class="lu-cards"></div><div class="lu-foot"></div></div>');
+  const el = open('levelup', '<div class="lu-box"><p class="lu-head"></p><div class="lu-cards"></div><p class="lu-wait">ボタンから手をはなすと選べます</p><div class="lu-foot"></div></div>');
   const head = el.querySelector<HTMLElement>('.lu-head')!;
   const box = el.querySelector<HTMLElement>('.lu-cards')!;
   const foot = el.querySelector<HTMLElement>('.lu-foot')!;
@@ -543,6 +569,7 @@ export function levelUpScreen(run: Run, auto: boolean): Promise<void> {
       if (done || !cards[i]) return;
       done = true;
       window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keydown', mash, true);
       takeCard(run, cards[i]);
       run.pending = Math.max(0, run.pending - 1);
       sfx('levelup');
@@ -555,11 +582,29 @@ export function levelUpScreen(run: Run, auto: boolean): Promise<void> {
     };
     const onKey = (e: KeyboardEvent) => {
       const i = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(e.code);
-      if (i >= 0) pick(i);
+      if (i >= 0 && armed) pick(i);
     };
-    // a short guard so a key held for steering does not pick by accident
-    window.setTimeout(() => window.addEventListener('keydown', onKey), 250);
+    // A guard against button mashing: the cards cannot be taken until the hands have been still for a moment.
+    // Every press during the guard (a tap anywhere, a key) starts the wait again.
+    let armed = false;
+    let timer = 0;
+    const arm = (ms: number) => {
+      window.clearTimeout(timer);
+      el.classList.remove('armed');
+      timer = window.setTimeout(() => {
+        armed = true;
+        el.classList.add('armed');
+      }, ms);
+    };
+    const mash = (e: Event) => {
+      if (!armed && !(e as KeyboardEvent).repeat) arm(450);
+    };
+    arm(700);
+    el.addEventListener('pointerdown', mash, true);
+    window.addEventListener('keydown', mash, true);
+    window.addEventListener('keydown', onKey);
     el.addEventListener('click', (e) => {
+      if (!armed) return;
       const t = e.target as HTMLElement;
       if (t.closest('#lu-re') && run.rerolls > 0) {
         run.rerolls -= 1;

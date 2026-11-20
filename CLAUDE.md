@@ -17,3 +17,6 @@
 - チェック：`npm test`・`npm run typecheck`・`npm run build`。
 - PC とスマホ横持ちの両方で遊べること（スマホは左に仮想スティック、右に A・B）。ボタンは 44px 以上、ドット絵は `image-rendering: pixelated`。画面を直したら 1280×720 と 844×390 で重なりを確かめる。
 - 陸は前へ自動で走り、プレイヤーは上下だけを操作する（`land.ts` の `heroControl`）。関門の手前（`FREE_ZONE`）だけは自動前進が止まり、上下左右に自由に動ける。宝箱パネルはコースを横切る縦一列（`CHEST_ROW` 枚）で、取られても `CHEST_BACK` 秒で戻る。リンク共有用の画像は `public/og.png`（1200×630）。強化はレベルアップのカード選択（`screens.ts` の `levelUpScreen`、選ぶあいだは `arena.picking` でレース全体が止まる）。宝箱パネルのお助けエクステンションは `land.ts` の `useItem`・`stepItems`。妨害するものは必ず `reflects`（鏡）を通す。
+- 陸の順位はゴールライン（`len`）を越えたときに決まる。最後の関門はその `LAST_RUN` 手前。ゴール後は `outro`（`arena.ts`）になり、時計を止めたまま `afterglow` でヒーローが走り続け、`main.ts` が `goalScreen` を出す（押すと次へ）。`?quick=1` のときは待たずに進む。
+- レベルアップのカードは、押すのをやめて少し待つまで選べない（`levelUpScreen` の `armed`）。連打対策なので外さない。
+- 海は 30 組・先着 10 組（`sea.ts`）。門は走者ごと（`Runner.gate`）で、その深さの遺物を自分で掘ると通れる。ライバルの道順は `plan`、動きは `rivalAI`（画面の外は壁もエネミーも見ない簡略版）。難度は `PACE_MIN`・`PACE_SPAN`・`DIG_MIN`・`DIG_SPAN`。

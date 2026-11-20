@@ -29,6 +29,8 @@ export interface Stats {
   // helper items
   iTrap: number; iDecoy: number; iMirror: number; iBolt: number; iDragon: number; itemPower: number; itemSlots: number; chests: number;
   enemyHp: number; enemyCount: number; course: number; rival: number;
+  // the sea: digging speed, how fast the tank empties, what a vent gives back, the harpoon
+  dig: number; o2: number; vent: number; harpoon: number;
 }
 export const BASE: Stats = {
   dmg: 1, speed: 1, hp: 1, regen: 0, cd: 1, crit: 0.04,
@@ -41,6 +43,7 @@ export const BASE: Stats = {
   bRamen: 0, bHorse: 0, bShield: 0, bOriflamme: 0, bSpecimen: 0, bGunbai: 0, bGyoku: 0, bCrown: 0,
   iTrap: 0, iDecoy: 0, iMirror: 0, iBolt: 0, iDragon: 0, itemPower: 1, itemSlots: 2, chests: 1,
   enemyHp: 1, enemyCount: 1, course: 1, rival: 0,
+  dig: 1, o2: 1, vent: 1, harpoon: 1,
 };
 type Key = keyof Stats;
 type Effect = { k: Key; op: 'add' | 'mul' | 'pow' | 'set'; v: number };
@@ -103,6 +106,11 @@ export const SKILLS: SkillNode[] = [
   open('bHorse', 'seiryu', 'ホースの解禁', '攻撃の間隔を縮める「ホース」が候補に出るようになる', 3005, 4, -1, 240, ['dashHit'], 'bHorse'),
   node({ id: 'pads', branch: 'seiryu', name: 'ダッシュパネル', desc: 'コースに、踏むと加速するパネルが置かれるようになる', icon: art(3115), x: 4, y: 0, baseCost: 180, requires: ['draft'], effects: [set('pads', 1)], flavor: 'new' }),
   node({ id: 'padPower', branch: 'seiryu', name: 'パネルの整備', desc: 'ダッシュパネルの加速が 20% 長く続く', icon: art(3038), x: 5, y: 0, max: 5, baseCost: 120, growth: 1.6, requires: ['pads'], effects: [mul('padPower', 0.2)] }),
+  // …and the sea
+  node({ id: 'dig', branch: 'seiryu', name: '発掘の心得', desc: '海で、遺物や秘宝を掘る速さ +15%', icon: art(3109), x: 3, y: 1, max: 5, baseCost: 60, growth: 1.7, requires: ['rocket'], effects: [mul('dig', 0.15)], flavor: 'new' }),
+  node({ id: 'o2', branch: 'seiryu', name: '深呼吸', desc: '海で、酸素の減りが 6% おそくなる', icon: art(3044), x: 4, y: 1, max: 5, baseCost: 80, growth: 1.7, requires: ['dig'], effects: [pow('o2', 0.94)] }),
+  node({ id: 'vent', branch: 'seiryu', name: '泡の恵み', desc: '海の噴気孔で回復する酸素 +25%', icon: art(3051), x: 5, y: 1, max: 4, baseCost: 90, growth: 1.7, requires: ['o2'], effects: [mul('vent', 0.25)] }),
+  node({ id: 'harpoon', branch: 'seiryu', name: '銛の名手', desc: '海で、銛の威力 +20%。撃つ間隔も少し縮む', icon: art(3007), x: 4, y: 2, max: 5, baseCost: 80, growth: 1.7, requires: ['dig'], effects: [mul('harpoon', 0.2)] }),
 
   // 玄武: staying on your feet (left)
   node({ id: 'hp', branch: 'genbu', name: '頑健', desc: '最大 HP（海では酸素）+8%', icon: art(2004), x: -1, y: 0, max: 10, baseCost: 12, growth: 1.5, requires: ['root'], effects: [mul('hp', 0.08)] }),
@@ -164,7 +172,8 @@ export const FEATS: Feat[] = [
   { id: 'noko', name: '無傷の走り', desc: '一度も気絶せずに陸を完走する' },
   { id: 'foul', name: 'レッドカード', desc: '反則を取られる' },
   { id: 'passive', name: '英霊の声', desc: 'パッシブスキルを発動させる' },
-  { id: 'sea', name: '深海へ', desc: '海をクリアする' },
+  { id: 'sea', name: '深海へ', desc: '海で秘宝を手に入れる（10 位以内）' },
+  { id: 'sea1', name: '海の覇者', desc: '海で最初に秘宝を手に入れる' },
   { id: 'sky', name: '宇宙へ', desc: '空をクリアする' },
 ];
 

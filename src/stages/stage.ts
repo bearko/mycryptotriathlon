@@ -42,6 +42,8 @@ export interface Stage {
   /** Stage clock in seconds (includes penalties). */
   time: number;
   finished: boolean;
+  /** True once the place is settled and the hero is running on past the line: the race waits for the player to move on. */
+  outro?: boolean;
   /** Set when the race ends: the place taken, and whether that was enough to go on. */
   result?: StageResult;
   update(dt: number): void;

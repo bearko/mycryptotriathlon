@@ -1,12 +1,14 @@
-// SEA: dive to the bottom. Each depth is sealed by a gate; dig up that depth's relic to open it.
-// Oxygen is the life bar and it is always running out. Chests hold more gear for the fighter.
+// SEA: thirty teams dive for the treasure at the bottom; there are only ten of them.
+// Each depth is sealed by a gate, and every diver has to dig up that depth's relic for themselves to get through.
+// Oxygen is the life bar and it is always running out: an empty tank means a few seconds out cold.
 
 import { sample, sfx } from '../core/audio';
-import { cat, type EnemyArt } from '../core/catalog';
+import { cat, type EnemyArt, type Hero } from '../core/catalog';
 import { input } from '../core/input';
 import { clamp, dist2, hash2, mixColor, rint, TAU } from '../core/util';
+import { earn } from '../game/meta';
 import { levelMul, xpNeed } from '../game/run';
-import { Arena, type Enemy } from './arena';
+import { Arena, makeRunner, type Enemy, type Runner } from './arena';
 import type { Host } from './stage';
 
 const T = 48;
@@ -16,11 +18,23 @@ const GATE_ROWS = [42, 84, 122];
 const ROOM_TOP = 123;
 const ROOM_BOTTOM = 137;
 const DRAIN = [1.3, 1.6, 1.9, 1.6];
+const FIELD = 30;
+const QUOTA = 10;
+/** Rivals: how fast the slowest swims, how much faster the best is, and how quickly they dig. */
+const PACE_MIN = 158;
+const PACE_SPAN = 64;
+const DIG_MIN = 0.6;
+const DIG_SPAN = 0.6;
 
 interface Dig {
   x: number; y: number; kind: 'chest' | 'relic' | 'treasure'; zone: number; prog: number; need: number; done: boolean;
+  /** The row of the side tunnel that leads to it (relics). */
+  row: number;
 }
-interface Gate { row: number; y: number; open: boolean; x0: number; x1: number }
+interface Gate { row: number; y: number; x0: number; x1: number; first: boolean }
+interface Pt { x: number; y: number; dig: Dig | null }
+/** A rival's route: the points still to swim through, and how the digging is going. */
+interface Nav { pts: Pt[]; lane: number; dig: number; rate: number; stuck: number; zone: number }
 interface Vent { x: number; y: number; cd: number }
 
 const WATER: [number, number, number][] = [[32, 150, 190], [14, 74, 128], [8, 30, 66], [4, 10, 26]];
@@ -78,17 +92,20 @@ export function buildSea(rng: () => number) {
     const span = GATE_ROWS[z] - 4 - top;
     const relicRow = top + Math.floor(span * (0.52 + rng() * 0.2));
     const p = side(relicRow, 8, 5, 4);
-    digs.push({ ...p, kind: 'relic', zone: z, prog: 0, need: 2.4, done: false });
+    digs.push({ ...p, kind: 'relic', zone: z, prog: 0, need: 2.4, done: false, row: relicRow });
     for (const f of [0.12 + rng() * 0.1, 0.84 + rng() * 0.1]) {
       const row = top + Math.floor(span * f);
       if (Math.abs(row - relicRow) < 5) continue;
       const c = side(row, 5, 3, 3);
-      digs.push({ ...c, kind: 'chest', zone: z, prog: 0, need: 0.8, done: false });
+      digs.push({ ...c, kind: 'chest', zone: z, prog: 0, need: 0.8, done: false, row });
     }
   }
-  digs.push({ x: 15 * T, y: (ROOM_BOTTOM + 1) * T - 6, kind: 'treasure', zone: 3, prog: 0, need: 2, done: false });
+  // ten treasures on the floor of the last room: first come, first served
+  for (let i = 0; i < QUOTA; i++) {
+    digs.push({ x: (5.5 + i * 2.1) * T, y: (ROOM_BOTTOM + 1) * T - 6, kind: 'treasure', zone: 3, prog: 0, need: 2.2, done: false, row: ROOM_BOTTOM });
+  }
   const gates: Gate[] = GATE_ROWS.map((row) => ({
-    row, y: row * T, open: false, x0: (path[row] - half[row]) * T, x1: (path[row] + half[row] + 1) * T,
+    row, y: row * T, first: true, x0: (path[row] - half[row]) * T, x1: (path[row] + half[row] + 1) * T,
   }));
   return { solid, path, half, digs, gates };
 }
@@ -105,6 +122,17 @@ export class SeaStage extends Arena {
   private dark: HTMLCanvasElement;
   private boss: Enemy | null = null;
   private bossCalled = false;
+  private relics: Dig[];
+  private treasures: Dig[];
+  private endY: number;
+  private nav = new Map<Runner, Nav>();
+  private passed = 0;
+  private place = FIELD;
+  private rankT = 0;
+  private chatT = 6;
+  private wasOut = false;
+  /** Debug: when each rival took a treasure. */
+  finishTimes: number[] = [];
   private bubbleT = 0;
   private botPath: number[] = [];
   private botT = 0;
@@ -118,6 +146,10 @@ export class SeaStage extends Arena {
     this.half = m.half;
     this.digs = m.digs;
     this.gates = m.gates;
+    this.relics = m.digs.filter((d) => d.kind === 'relic');
+    this.treasures = m.digs.filter((d) => d.kind === 'treasure');
+    this.endY = this.treasures[0].y;
+    this.koMode = true;
     this.dark = document.createElement('canvas');
 
     const h = this.hero;
@@ -128,6 +160,28 @@ export class SeaStage extends Arena {
     h.r = 14;
     h.fy = 1;
     h.fx = 0;
+
+    // the other twenty-nine teams
+    const mine = new Set(this.run.heroes.map((x) => x.id));
+    const pool: Hero[] = cat.heroes.filter((x) => !mine.has(x.id));
+    for (let i = 0; i < FIELD - 1; i++) {
+      const art = pool.splice(Math.floor(Math.random() * pool.length), 1)[0];
+      const r = makeRunner(art, false);
+      const skill = i / (FIELD - 2);
+      r.pace = (PACE_MIN + PACE_SPAN * skill + 16 * skill ** 3 + (Math.random() - 0.5) * 6) * (1 + this.st.rival);
+      r.dps = 50 + 110 * skill;
+      r.mood = Math.random();
+      r.maxHp = r.hp = 150;
+      r.r = 14;
+      r.x = (4 + ((i * 7) % 22) + Math.random()) * T;
+      r.y = (0.8 + Math.random() * 1.4) * T;
+      r.think = Math.random();
+      this.nav.set(r, { pts: [], lane: (Math.random() - 0.5) * 2, dig: 0, rate: DIG_MIN + DIG_SPAN * skill, stuck: 0, zone: -1 });
+      this.rivals.push(r);
+    }
+    // referees: one watching each relic, one over the treasures
+    for (const d of this.relics) this.refs.push({ x: d.x, y: d.y - 60, r: 190, homeY: d.y - 60, t: d.zone * 2, alert: 0, sway: 14 });
+    this.refs.push({ x: 15 * T, y: (ROOM_BOTTOM - 2) * T, r: 260, homeY: (ROOM_BOTTOM - 2) * T, t: 1, alert: 0, sway: 30 });
 
     const rng = this.rng;
     const en = cat.enemies;
@@ -159,7 +213,7 @@ export class SeaStage extends Arena {
       } else {
         const y = en.yoshka[d.zone - 1];
         this.spawn({ url: y.img, name: y.name }, d.x, d.y - 70, {
-          hp: d.zone === 1 ? 420 : 800, size: 92, r: 28, speed: 62, dmg: 12 + d.zone * 2, ai: 'burst', elite: true, xp: 14, tier: d.zone, asleep: true, timer: 1.5,
+          hp: d.zone === 1 ? 900 : 1700, size: 92, r: 28, speed: 62, dmg: 12 + d.zone * 2, ai: 'burst', elite: true, xp: 14, tier: d.zone, asleep: true, timer: 1.5,
         });
       }
     }
@@ -171,8 +225,17 @@ export class SeaStage extends Arena {
     }
     this.vents.push({ x: 6 * T, y: ROOM_BOTTOM * T + 20, cd: 0 }, { x: 24 * T, y: ROOM_BOTTOM * T + 20, cd: 0 });
 
+    // the lord of the deep cannot be beaten: it guards the treasures until they are all gone
+    const lord = cat.enemies.seaBoss[0];
+    this.boss = this.spawn({ url: lord.img, name: lord.name }, 15 * T, (ROOM_BOTTOM - 5) * T, {
+      hp: 1e9, size: 190, r: 54, speed: 60, dmg: 13, ai: 'boss', boss: true, xp: 0, tier: 3, timer: 1.6, asleep: true,
+    });
+
     host.hud.slots(this.run.slots);
-    host.hud.objective('矢印の先の遺物を掘り出して、門を開け');
+    host.hud.fouls(0, this.st.foulLimit);
+    host.hud.objective('矢印の先の遺物を掘り出して、門を抜けろ');
+    host.hud.say(`第2種目は海！ ${FIELD}組が一斉に潜ります。秘宝は${QUOTA}個、早い者勝ち！`, 3);
+    host.hud.say('門は、自分で遺物を掘り出した人しか通れません。酸素にも気をつけて', 2, 'ain');
     this.follow(1);
   }
 
@@ -218,10 +281,13 @@ export class SeaStage extends Arena {
       if (!this.boxHit(b.x, ny, hr)) b.y = ny;
     }
     if (b.y < 26) b.y = 26;
-    const gate = this.gates.find((g) => !g.open);
-    if (gate) {
+    // a diver is stopped only by the gate they have no relic for; the creatures of a depth never leave it
+    const gi = (b as Runner).gate;
+    for (let i = gi === undefined ? 0 : gi; i < this.gates.length; i++) {
+      const gate = this.gates[i];
       if (py <= gate.y && b.y > gate.y - b.r - 4) b.y = gate.y - b.r - 4;
       else if (py > gate.y && b.y < gate.y + b.r + 4) b.y = gate.y + b.r + 4;
+      if (gi !== undefined) break;
     }
   }
 
@@ -232,14 +298,19 @@ export class SeaStage extends Arena {
 
   /** What the sonar points at. */
   private goal(): { x: number; y: number; label: string } {
-    const gate = this.gates.find((g) => !g.open);
-    if (gate) {
-      const relic = this.digs.find((d) => d.kind === 'relic' && d.zone === this.gates.indexOf(gate))!;
-      return { x: relic.x, y: relic.y, label: '遺物' };
+    const h = this.hero;
+    const relic = this.relics[h.gate];
+    if (relic) return { x: relic.x, y: relic.y, label: '遺物' };
+    let best = this.treasures[0];
+    let bd = 1e12;
+    for (const d of this.treasures) {
+      const dd = dist2(d.x, d.y, h.x, h.y);
+      if (!d.done && dd < bd) {
+        bd = dd;
+        best = d;
+      }
     }
-    if (this.boss && !this.boss.dead) return { x: this.boss.x, y: this.boss.y, label: '主' };
-    const tr = this.digs[this.digs.length - 1];
-    return { x: tr.x, y: tr.y, label: '秘宝' };
+    return { x: best.x, y: best.y, label: '秘宝' };
   }
 
   protected heroControl(dt: number): void {
@@ -253,13 +324,21 @@ export class SeaStage extends Arena {
     this.follow(1 - Math.pow(0.0015, dt));
 
     // oxygen
-    h.hp -= DRAIN[zone] * dt;
-    if (h.hp <= 0) this.down();
+    if (h.ko <= 0) {
+      if (this.wasOut) h.hp = Math.max(h.hp, h.maxHp * 0.6);
+      h.hp -= DRAIN[zone] * this.st.o2 * dt;
+      if (h.hp <= 0) {
+        this.host.hud.say(`${this.heroArt.name}、酸素が切れた！`, 3);
+        this.faint();
+      }
+    }
+    this.wasOut = h.ko > 0;
     if (h.hp < h.maxHp * 0.25 && Math.floor(this.time * 2) !== Math.floor((this.time - dt) * 2)) sfx('count');
 
     // harpoon
     this.harpoonCd = Math.max(0, this.harpoonCd - dt);
-    if (input.a && this.harpoonCd <= 0) {
+    const reload = 0.55 * Math.pow(0.95, this.st.harpoon - 1);
+    if (input.a && this.harpoonCd <= 0 && h.ko <= 0 && h.frozen <= 0) {
       let ax = h.fx;
       let ay = h.fy;
       if (input.pointer.aim && !this.host.bot) {
@@ -276,36 +355,42 @@ export class SeaStage extends Arena {
         }
       }
       const l = Math.hypot(ax, ay) || 1;
-      this.arsenal.shoot(h.x, h.y, (ax / l) * 900, (ay / l) * 900, 30 * this.traits.phy * levelMul(this.run.level), 1, 0.5);
-      this.harpoonCd = 0.55;
+      this.arsenal.shoot(h.x, h.y, (ax / l) * 900, (ay / l) * 900, 30 * this.traits.phy * levelMul(this.run.level) * this.st.harpoon, 1, 0.5);
+      this.harpoonCd = reload;
       sfx('harpoon');
+    }
+
+    // a harpoon that finds a rival is a direct attack: it breaks their digging, and the referee may be watching
+    for (const p of this.arsenal.projs) {
+      if (!p.line || p.life <= 0) continue;
+      for (const r of this.rivals) {
+        if (r.done || r.ko > 0 || r.inv > 0 || !r.near || dist2(r.x, r.y, p.x, p.y) > (r.r + 10) ** 2) continue;
+        p.life = 0;
+        this.hurtRunner(r, 18 * this.st.strike, h.x, h.y, h);
+        const ref = this.watching(r.x, r.y);
+        if (ref) {
+          ref.alert = 1;
+          this.foul(h, 1);
+        } else hud.say(`${this.heroArt.name}の銛が${r.name}に命中！ 審判は見ていません！`, 2);
+        break;
+      }
     }
 
     // digging happens by itself while the diver stays close
     let digging: Dig | null = null;
-    for (const d of this.digs) {
-      if (d.done) continue;
-      if (d.kind === 'treasure' && (!this.boss || !this.boss.dead)) continue;
-      if (dist2(d.x, d.y - 14, h.x, h.y) < 62 * 62) {
-        digging = d;
-        break;
-      }
-    }
-    // a relic cannot be lifted while its guardian is still awake beside it
-    if (digging && digging.kind === 'relic') {
-      const guard = this.enemies.some((e) => !e.dead && !e.asleep && e.elite && dist2(e.x, e.y, digging!.x, digging!.y) < 300 * 300);
-      if (guard) {
-        this.digT -= dt;
-        if (this.digT <= 0) {
-          this.digT = 0.8;
-          this.floats.push({ x: digging.x, y: digging.y - 70, text: '番人を倒せ', color: '#ff8fa3', t: 0, big: false });
+    if (h.ko <= 0 && h.frozen <= 0) {
+      for (const d of this.digs) {
+        if (d.done) continue;
+        if (d.kind === 'relic' && d.zone !== h.gate) continue;
+        if (dist2(d.x, d.y - 14, h.x, h.y) < 62 * 62) {
+          digging = d;
+          break;
         }
-        digging = null;
       }
     }
     if (digging) {
       if (h.inv > 0.45) digging.prog = Math.max(0, digging.prog - dt * 2);
-      else digging.prog += dt;
+      else digging.prog += dt * this.st.dig;
       this.digT -= dt;
       if (this.digT <= 0) {
         this.digT = 0.16;
@@ -314,6 +399,7 @@ export class SeaStage extends Arena {
       }
       if (digging.prog >= digging.need) this.dug(digging);
     }
+    if (this.finished) return;
     for (const d of this.digs) if (d !== digging && !d.done) d.prog = Math.max(0, d.prog - dt * 0.5);
 
     // air vents
@@ -321,24 +407,57 @@ export class SeaStage extends Arena {
       v.cd = Math.max(0, v.cd - dt);
       if (v.cd <= 0 && dist2(v.x, v.y - 30, h.x, h.y) < 50 * 50 && h.hp < h.maxHp - 1) {
         v.cd = 7;
-        h.hp = Math.min(h.maxHp, h.hp + 30);
+        h.hp = Math.min(h.maxHp, h.hp + 30 * this.st.vent);
         sfx('bubble');
         sample('heal', 0.4);
-        this.floats.push({ x: h.x, y: h.y - 40, text: 'O₂ +30', color: '#9be9ff', t: 0, big: true });
+        this.floats.push({ x: h.x, y: h.y - 40, text: `O₂ +${Math.round(30 * this.st.vent)}`, color: '#9be9ff', t: 0, big: true });
       }
     }
 
-    // the lord of the deep wakes when the diver enters the last room
+    // the last room
     if (!this.bossCalled && h.y > (ROOM_TOP + 1) * T) {
       this.bossCalled = true;
-      const a = cat.enemies.seaBoss[0];
-      this.boss = this.spawn({ url: a.img, name: a.name }, 15 * T, (ROOM_BOTTOM - 4) * T, {
-        hp: 4400, size: 190, r: 54, speed: 64, dmg: 14, ai: 'boss', boss: true, xp: 60, tier: 3, timer: 1.6,
-      });
-      this.bossRef = this.boss;
       sfx('warn');
-      hud.banner('WARNING', `深海の主 ${a.name}`, 'warn');
-      hud.objective('深海の主を倒せ！');
+      hud.banner('最深部', `深海の主をかわして、秘宝を掘り出せ（残り ${QUOTA - this.passed}）`, 'warn');
+      hud.objective('秘宝を掘り出せ！ 主は倒せない');
+      hud.say(`${this.heroArt.name}が最深部に到達！ 秘宝は残り${QUOTA - this.passed}個！`, 3);
+    }
+
+    // who is where
+    const score = (r: Runner) => r.gate * 1e6 + r.y;
+    this.rankT -= dt;
+    if (this.rankT <= 0) {
+      this.rankT = 0.25;
+      let ahead = 0;
+      const mine = score(h);
+      for (const r of this.rivals) if (r.done || score(r) > mine) ahead++;
+      const was = this.place;
+      this.place = ahead + 1;
+      if (this.time > 4) {
+        if (was > QUOTA && this.place <= QUOTA) hud.say(`${this.heroArt.name}、通過圏内の${this.place}位に浮上！`, 2);
+        else if (was <= QUOTA && this.place > QUOTA) hud.say(`${this.heroArt.name}、通過圏外に後退…！`, 2, 'ain');
+      }
+      hud.rank(this.place, FIELD, this.passed, QUOTA);
+      const dots: number[] = [];
+      for (const r of this.rivals) dots.push(r.done ? 1 : clamp(r.y / this.endY, 0, 1));
+      hud.dots(dots, clamp(h.y / this.endY, 0, 1));
+    }
+    this.chatT -= dt;
+    if (this.chatT <= 0) {
+      this.chatT = 8 + Math.random() * 4;
+      const lines = [
+        `${this.heroArt.name}は現在${this.place}位。${this.place <= QUOTA ? 'このまま秘宝まで！' : 'まだ巻き返せます！'}`,
+        '掘っている最中に攻撃を受けると、発掘はやり直しです',
+        '噴気孔の泡で酸素を補給できますよ',
+        '遺物のそばには審判がいます。銛の向きにはご注意を',
+      ];
+      hud.say(lines[Math.floor(Math.random() * lines.length)], 1, Math.random() < 0.5 ? 'ain' : 'chris');
+    }
+    if (this.passed >= QUOTA) {
+      this.finished = true;
+      this.result = { place: this.place, field: FIELD, quota: QUOTA, qualified: false, progress: clamp(h.y / this.endY, 0, 0.99), gates: h.gate };
+      sample('lose', 0.6);
+      return;
     }
 
     // bubbles from the diver
@@ -348,18 +467,17 @@ export class SeaStage extends Arena {
       this.parts.push({ x: h.x + (h.flip ? 8 : -8), y: h.y - 22, vx: (Math.random() - 0.5) * 20, vy: -60, life: 1.2, max: 1.2, color: 'rgba(220,245,255,0.8)', size: 3 + Math.random() * 3, g: -40 });
     }
 
-    const end = this.digs[this.digs.length - 1];
-    hud.gauge(clamp(h.hp / h.maxHp, 0, 1), `O₂ ${Math.max(0, Math.ceil(h.hp))}`);
-    hud.sub(1 - this.harpoonCd / 0.55);
-    hud.progress(clamp(h.y / end.y, 0, 1), this.gates.map((g) => g.y / end.y));
+    hud.gauge(clamp(h.hp / h.maxHp, 0, 1), h.ko > 0 ? `気絶 ${h.ko.toFixed(1)}` : h.frozen > 0 ? `反則 ${h.frozen.toFixed(1)}` : `O₂ ${Math.max(0, Math.ceil(h.hp))}`);
+    hud.sub(1 - this.harpoonCd / reload);
+    hud.progress(clamp(h.y / this.endY, 0, 1), this.gates.map((g) => g.y / this.endY));
     hud.level(this.run.level, this.run.xp / xpNeed(this.run.level));
     hud.gum(this.run.gum);
-    const b = this.bossRef;
-    hud.boss(b && !b.dead ? b.name : null, b ? b.hp / b.maxHp : 0);
+    hud.boss(this.bossCalled ? `秘宝 残り ${QUOTA - this.passed} / ${QUOTA}` : null, 1 - this.passed / QUOTA);
   }
 
   private dug(d: Dig): void {
-    d.done = true;
+    d.done = d.kind !== 'relic';
+    d.prog = 0;
     const h = this.hero;
     const hud = this.host.hud;
     sample('chest', 0.7);
@@ -369,17 +487,178 @@ export class SeaStage extends Arena {
       h.hp = Math.min(h.maxHp, h.hp + 15);
     } else if (d.kind === 'relic') {
       const gate = this.gates[d.zone];
-      gate.open = true;
+      h.gate = d.zone + 1;
       h.hp = h.maxHp;
       sfx('gate');
       this.grant(1);
-      hud.banner('門が開いた！', 'O₂ 全回復', 'good');
-      hud.objective(d.zone === 2 ? '最深部へ！' : '門を抜けて、さらに深くへ');
+      this.through(h, gate);
+      hud.banner('遺物を手に入れた！', 'O₂ 全回復・門を通れる', 'good');
+      hud.objective(d.zone === 2 ? '最深部へ！ 秘宝は早い者勝ち' : '門を抜けて、さらに深くへ');
       this.shake = 10;
     } else {
+      this.passed += 1;
+      const place = this.passed;
       this.finished = true;
+      this.result = { place, field: FIELD, quota: QUOTA, qualified: true, progress: 1, gates: 3 };
+      earn('sea');
+      if (place === 1) earn('sea1');
       sample('clear', 0.7);
     }
+  }
+
+  /** Someone has earned their way through a gate. */
+  private through(r: Runner, gate: Gate): void {
+    if (!gate.first) return;
+    gate.first = false;
+    const which = ['浅瀬の門', '中層の門', '深層の門'][this.gates.indexOf(gate)];
+    this.host.hud.say(`${which}を最初に抜けるのは ${r.name}！`, 2);
+  }
+
+  // ------------------------------------------------------------------ rivals
+  /** Lays out where a rival swims next: down the shaft to their relic, or to a treasure that is still there. */
+  private plan(r: Runner, n: Nav): void {
+    n.pts = [];
+    n.zone = r.gate;
+    n.dig = 0;
+    const row0 = clamp(Math.floor(r.y / T), 0, ROOM_BOTTOM);
+    const lane = (y: number) => (this.path[y] + 0.5 + n.lane * Math.max(0, this.half[y] - 1.5)) * T;
+    const back = (this.path[row0] + 0.5) * T;
+    if (Math.abs(r.x - back) > (this.half[row0] - 0.5) * T) n.pts.push({ x: back, y: r.y, dig: null });
+    const relic = this.relics[r.gate];
+    if (relic) {
+      for (let y = row0 + 1; y <= relic.row; y += 2) n.pts.push({ x: lane(y), y: (y + 0.5) * T, dig: null });
+      n.pts.push({ x: (this.path[relic.row + 1] + 0.5) * T, y: (relic.row + 1) * T, dig: null });
+      n.pts.push({ x: relic.x, y: (relic.row + 1.5) * T, dig: relic });
+    } else {
+      for (let y = row0 + 1; y <= ROOM_TOP + 1; y += 2) n.pts.push({ x: lane(y), y: (y + 0.5) * T, dig: null });
+      const free = this.treasures.filter((d) => !d.done);
+      const d = free[Math.floor(Math.random() * free.length)];
+      if (d) n.pts.push({ x: d.x, y: (ROOM_BOTTOM + 0.5) * T, dig: d });
+    }
+  }
+
+  protected rivalAI(r: Runner, dt: number): void {
+    const n = this.nav.get(r)!;
+    r.near = r.y > this.camY - 420 && r.y < this.camY + this.vh + 420;
+    r.strikeT = Math.max(0, r.strikeT - dt);
+    r.think -= dt;
+    if (!n.pts.length || n.zone !== r.gate) this.plan(r, n);
+    const pt = n.pts[0];
+    if (!pt) return;
+    if (pt.dig && pt.dig.done) {
+      // someone else got to that treasure first
+      n.pts = [];
+      return;
+    }
+    const sp = r.pace * (r.slow > 0 ? 0.6 : 1) * (r.buffSpd > 0 ? 1.25 : 1);
+    const dx = pt.x - r.x;
+    const dy = pt.y - r.y;
+    const d = Math.hypot(dx, dy) || 1;
+
+    if (r.think <= 0) {
+      r.think = r.near ? 0.5 : 2;
+      // out of sight nothing is simulated around them, so trouble (a monster, an empty tank) is rolled instead
+      const weak = 1.3 - (r.pace - PACE_MIN) / PACE_SPAN;
+      if (Math.random() < (r.near ? 0.004 : 0.045) * weak) {
+        if (r.near) this.host.hud.say(`${r.name}、酸素が切れた！`, 1, 'ain');
+        this.hurtRunner(r, 999);
+        return;
+      }
+      // rough divers poke whoever is digging beside them, and the referee is watching them too
+      if (r.near && r.mood > 0.6 && r.strikeT <= 0) {
+        const seen = this.watching(r.x, r.y);
+        if (Math.random() < (seen ? 0.03 : 0.25)) {
+          for (const o of [this.hero, ...this.rivals]) {
+            if (o === r || o.done || o.ko > 0 || dist2(o.x, o.y, r.x, r.y) > 52 * 52) continue;
+            r.strikeT = 3;
+            this.arcs.push({ x: r.x, y: r.y, ang: Math.atan2(o.y - r.y, o.x - r.x), r: 60, t: 0, color: '#ff8fa3' });
+            this.hurtRunner(o, 12, r.x, r.y, r);
+            if (seen) {
+              seen.alert = 1;
+              if (o.me) this.host.hud.say(`${r.name}が${o.name}に直接攻撃！ 審判が見ています、反則ポイント！`, 2);
+              this.foul(r, 1);
+            } else if (o.me) this.host.hud.say(`${r.name}が審判の死角で${o.name}を攻撃！`, 2);
+            break;
+          }
+        }
+      }
+    }
+
+    if (d < 16) {
+      if (!pt.dig) {
+        n.pts.shift();
+        n.stuck = 0;
+        return;
+      }
+      // digging: a blow sets it back, just as it does for the player
+      r.moving = false;
+      r.vx = r.vy = 0;
+      if (r.inv > 0.2) n.dig = Math.max(0, n.dig - dt * 2);
+      else n.dig += dt * n.rate;
+      if (r.near && Math.random() < dt * 5) this.puff(pt.dig.x + (Math.random() - 0.5) * 30, pt.dig.y, '#d9c7a0', 1, 120);
+      if (n.dig >= pt.dig.need) {
+        if (pt.dig.kind === 'relic') {
+          r.gate += 1;
+          r.hp = r.maxHp;
+          this.through(r, this.gates[pt.dig.zone]);
+        } else {
+          pt.dig.done = true;
+          r.done = true;
+          this.passed += 1;
+          r.place = this.passed;
+          this.finishTimes.push(Math.round(this.time * 10) / 10);
+          const hud = this.host.hud;
+          if (this.passed === 1) hud.say(`最初の秘宝を手にしたのは ${r.name}！`, 3);
+          else if (this.passed <= 3) hud.say(`${this.passed}個目の秘宝は ${r.name}！`, 2);
+          const left = QUOTA - this.passed;
+          if (left === 5 || left === 3 || left === 1) hud.say(`秘宝は、残り${left}個！`, 3, 'ain');
+        }
+        n.pts = [];
+      }
+      return;
+    }
+
+    let vx = (dx / d) * sp;
+    let vy = (dy / d) * sp;
+    if (!r.near) {
+      r.x += vx * dt;
+      r.y += vy * dt;
+      r.moving = true;
+      return;
+    }
+    // fight what is in reach, and lean away from what is too close
+    let hit: Enemy | null = null;
+    for (const e of this.enemies) {
+      if (e.dead || e.asleep) continue;
+      const d2 = dist2(e.x, e.y, r.x, r.y);
+      if (d2 < (105 + e.r) ** 2 && !hit) hit = e;
+      if (!e.boss && d2 < 60 * 60) {
+        const dd = Math.sqrt(d2) || 1;
+        vx += ((r.x - e.x) / dd) * 70;
+        vy += ((r.y - e.y) / dd) * 70;
+      }
+    }
+    r.atk -= dt;
+    if (hit && r.atk <= 0) {
+      r.atk = 0.5;
+      if (!hit.boss) this.hitEnemy(hit, r.dps * 0.5, (hit.x - r.x) * 0.6, (hit.y - r.y) * 0.6, r);
+      if (this.arcs.length < 24) this.arcs.push({ x: r.x, y: r.y, ang: Math.atan2(hit.y - r.y, hit.x - r.x), r: 64, t: 0, color: '#c9d2ff' });
+      this.passive(r, 'skill');
+    }
+    r.vx += (vx - r.vx) * Math.min(1, dt * 6);
+    r.vy += (vy - r.vy) * Math.min(1, dt * 6);
+    const bx = r.x;
+    const by = r.y;
+    // a rival wedged on a corner for too long simply slips past it
+    if (n.stuck > 1.5) {
+      r.x += (dx / d) * sp * dt;
+      r.y += (dy / d) * sp * dt;
+      if (n.stuck > 2.5) n.stuck = 0;
+    } else this.moveBody(r, r.vx * dt, r.vy * dt);
+    n.stuck += Math.hypot(r.x - bx, r.y - by) < sp * dt * 0.3 ? dt : n.stuck > 1.5 ? dt : -n.stuck;
+    r.moving = true;
+    if (Math.abs(r.vx) > 20) r.flip = r.vx > 0;
+    r.bob += dt * 8;
   }
 
   protected bossAI(e: Enemy, dt: number): void {
@@ -415,7 +694,7 @@ export class SeaStage extends Arena {
           sfx('beast');
         } else {
           const en = cat.enemies.creeper;
-          if (this.enemies.length < 26) {
+          if (this.enemies.filter((o) => !o.dead && !o.asleep).length < 18) {
             for (let i = 0; i < 3; i++) {
               const a = en[4];
               this.spawn({ url: a.img, name: a.name }, e.x + (i - 1) * 90, e.y - 80, { hp: 70, speed: 120, dmg: 10, ai: 'chase', xp: 3, tier: 4 });
@@ -433,37 +712,6 @@ export class SeaStage extends Arena {
         e.timer = 1.6;
       }
     }
-  }
-
-  protected killed(e: Enemy): void {
-    if (e === this.boss) {
-      this.bossRef = null;
-      this.ebullets.length = 0;
-      for (const o of this.enemies) if (!o.dead && o !== e && !o.asleep) o.dead = true;
-      this.hero.hp = this.hero.maxHp;
-      this.host.hud.banner('討伐！', '秘宝を掘り出せ', 'good');
-      this.host.hud.objective('秘宝を掘り出せ！');
-    }
-  }
-
-  protected onDown(): void {
-    // pulled back up to the last open gate with a fresh tank
-    const h = this.hero;
-    const open = this.gates.filter((g) => g.open);
-    const last = open[open.length - 1];
-    if (this.bossCalled) {
-      h.x = 15 * T;
-      h.y = (ROOM_TOP + 2) * T;
-    } else if (last) {
-      h.x = (this.path[last.row + 2] + 0.5) * T;
-      h.y = (last.row + 2) * T;
-    } else {
-      h.x = 15 * T;
-      h.y = 1.4 * T;
-    }
-    h.vx = h.vy = 0;
-    this.follow(1);
-    this.host.hud.banner('酸欠！', '門まで引き上げられた', 'warn');
   }
 
   // ------------------------------------------------------------------ drawing
@@ -584,7 +832,8 @@ export class SeaStage extends Arena {
         g.fillRect(d.x - 22, d.y + 4, 44, 6);
         continue;
       }
-      const locked = d.kind === 'treasure' && (!this.boss || !this.boss.dead);
+      if (d.kind === 'relic' && this.hero.gate > d.zone) continue;
+      const locked = false;
       const pulse = 0.5 + Math.sin(this.time * 4) * 0.5;
       if (d.kind === 'relic') {
         g.globalAlpha = 0.25 + pulse * 0.2;
@@ -653,10 +902,11 @@ export class SeaStage extends Arena {
       g.fillStyle = '#2c2a44';
       g.fillRect(gt.x0 - 10, gt.y - 14, 20, 28);
       g.fillRect(gt.x1 - 10, gt.y - 14, 20, 28);
-      g.fillStyle = gt.open ? '#6dffa0' : '#7dfff0';
+      const open = this.hero.gate > this.gates.indexOf(gt);
+      g.fillStyle = open ? '#6dffa0' : '#7dfff0';
       g.fillRect(gt.x0 - 4, gt.y - 5, 8, 10);
       g.fillRect(gt.x1 - 4, gt.y - 5, 8, 10);
-      if (!gt.open) {
+      if (!open) {
         g.globalAlpha = 0.3;
         g.fillStyle = '#7dfff0';
         g.fillRect(gt.x0, gt.y - 8, gt.x1 - gt.x0, 16);
@@ -719,9 +969,11 @@ export class SeaStage extends Arena {
         d.fill();
       };
       hole(hx, hy, 330 - f * 90, 1);
+      for (const r of this.rivals) if (!r.done && r.near) hole(r.x - this.camX, r.y - this.camY, 70, 0.75);
+      for (const f of this.refs) hole(f.x - this.camX, f.y - this.camY, 90, 0.5);
       for (const dg of this.digs) if (!dg.done) hole(dg.x - this.camX, dg.y - 20 - this.camY, dg.kind === 'chest' ? 80 : 120, 0.8);
       for (const v of this.vents) hole(v.x - this.camX, v.y - this.camY, 70, 0.6);
-      for (const gt of this.gates) if (!gt.open) hole((gt.x0 + gt.x1) / 2 - this.camX, gt.y - this.camY, 200, 0.7);
+      for (const gt of this.gates) if (this.hero.gate <= this.gates.indexOf(gt)) hole((gt.x0 + gt.x1) / 2 - this.camX, gt.y - this.camY, 200, 0.7);
       for (const b of this.ebullets) hole(b.x - this.camX, b.y - this.camY, 34, 0.9);
       for (const s of this.arsenal.projs) hole(s.x - this.camX, s.y - this.camY, 40, 0.7);
       if (this.boss && !this.boss.dead) hole(this.boss.x - this.camX, this.boss.y - this.camY, 190, 0.85);
@@ -782,7 +1034,7 @@ export class SeaStage extends Arena {
     const prev = new Int32Array(W * HT).fill(-1);
     const queue = [sy * W + sx];
     prev[sy * W + sx] = sy * W + sx;
-    const gate = this.gates.find((g) => !g.open);
+    const gate = this.gates[h.gate];
     while (queue.length) {
       const c = queue.shift()!;
       if (c === ey * W + ex) break;
@@ -809,14 +1061,8 @@ export class SeaStage extends Arena {
   botStep(): { x: number; y: number; a: boolean; b: boolean } {
     const h = this.hero;
     const goal = this.goal();
-    let tx = goal.x;
-    let ty = goal.y - 20;
-    if (this.boss && !this.boss.dead) {
-      // keep away from the lord and let the gear work
-      const a = Math.atan2(h.y - this.boss.y, h.x - this.boss.x) + 0.5;
-      tx = clamp(this.boss.x + Math.cos(a) * 260, 5 * T, 25 * T);
-      ty = clamp(this.boss.y + Math.sin(a) * 260, (ROOM_TOP + 1) * T, (ROOM_BOTTOM + 0.5) * T);
-    }
+    const tx = goal.x;
+    const ty = goal.y - 20;
     this.botT -= 1 / 60;
     if (this.botT <= 0) {
       this.botT = 0.2;
@@ -830,7 +1076,9 @@ export class SeaStage extends Arena {
       y = (Math.floor(c / W) + 0.5) * T - h.y;
     }
     const l = Math.hypot(x, y);
-    if (l < 10) return { x: 0, y: 0, a: true, b: false };
-    return { x: x / l, y: y / l, a: true, b: false };
+    // the harpoon is for monsters: not with a rival close enough to catch it
+    const shoot = !!this.nearest(h.x, h.y, 320) && !this.rivals.some((r) => !r.done && dist2(r.x, r.y, h.x, h.y) < 170 * 170);
+    if (l < 10) return { x: 0, y: 0, a: shoot, b: false };
+    return { x: x / l, y: y / l, a: shoot, b: false };
   }
 }

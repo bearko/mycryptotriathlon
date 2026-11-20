@@ -42,7 +42,7 @@ export interface Runner {
   mirror: number; dragon: number; item: Item | null; itemT: number;
 }
 /** A referee standing on the course. Fouls only count inside the circle they can see. */
-export interface Referee { x: number; y: number; r: number; homeY: number; t: number; alert: number }
+export interface Referee { x: number; y: number; r: number; homeY: number; t: number; alert: number; sway?: number }
 export function makeRunner(art: Hero, me: boolean): Runner {
   return {
     x: 0, y: 0, vx: 0, vy: 0, r: 15, hp: 100, maxHp: 100, fx: 1, fy: 0, flip: true, inv: 0, dashT: 0, dashCd: 0,
@@ -79,6 +79,10 @@ export abstract class Arena implements Stage {
   rivals: Runner[] = [];
   refs: Referee[] = [];
   st: Stats;
+  /** The place is settled; the hero runs on while the player looks at it. The clock has stopped. */
+  outro = false;
+  /** Draw the rivals who have already finished (they run on past the line). */
+  showDone = false;
   /** Races with rivals: going down means a few seconds out cold, not a time penalty. */
   koMode = false;
   strikeCd = 0;
@@ -172,6 +176,8 @@ export abstract class Arena implements Stage {
   /** Called for every blow that lands on an enemy (`by` is a rival, or null for the player). */
   protected onHit(_e: Enemy, _dmg: number, _by: Runner | null): void {}
   protected onKo(_r: Runner): void {}
+  /** One step of the run past the finish line. */
+  protected afterglow(_dt: number): void {}
   protected onFoul(_r: Runner): void {}
   protected heroControl(dt: number): void {
     this.walk(dt, 1);
@@ -180,6 +186,11 @@ export abstract class Arena implements Stage {
   // ------------------------------------------------------------------ update
   update(dt: number): void {
     if (this.finished || this.picking) return;
+    if (this.outro) {
+      this.afterglow(dt);
+      this.stepFx(dt);
+      return;
+    }
     if (this.run.pending > 0 && this.hero.ko <= 0) {
       // a level-up: everything waits while a card is chosen
       this.picking = true;
@@ -216,7 +227,7 @@ export abstract class Arena implements Stage {
     for (const f of this.refs) {
       f.t += dt;
       f.alert = Math.max(0, f.alert - dt);
-      f.y = f.homeY + Math.sin(f.t * 0.5) * 150;
+      f.y = f.homeY + Math.sin(f.t * 0.5) * (f.sway ?? 150);
     }
     this.crowd();
     this.tick(dt);
@@ -618,14 +629,18 @@ export abstract class Arena implements Stage {
     }
     this.passive(h, 'hurt');
     if (h.hp <= 0) {
-      if (this.koMode) {
-        this.run.downs += 1;
-        this.shake = 16;
-        sfx('down');
-        this.host.hud.banner('気絶！', '', 'warn');
-        this.knockOut(h, by);
-      } else this.down();
+      if (this.koMode) this.faint(by);
+      else this.down();
     }
+  }
+
+  /** The hero is out cold for a few seconds (races with rivals). */
+  protected faint(by?: Runner): void {
+    this.run.downs += 1;
+    this.shake = 16;
+    sfx('down');
+    this.host.hud.banner('気絶！', '', 'warn');
+    this.knockOut(this.hero, by);
   }
 
   /** No game over: the hero gets back up, and the clock takes the hit. */
@@ -1079,7 +1094,7 @@ export abstract class Arena implements Stage {
     g.font = '10px DotGothic16, sans-serif';
     g.textAlign = 'center';
     for (const r of this.rivals) {
-      if (r.done || !seen(r.x, r.y)) continue;
+      if ((r.done && !this.showDone) || !seen(r.x, r.y)) continue;
       g.fillStyle = 'rgba(0,0,0,0.26)';
       g.beginPath();
       g.ellipse(r.x, r.y + 24, 17, 6, 0, 0, TAU);

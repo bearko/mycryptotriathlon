@@ -19,6 +19,8 @@ const BOTTOM = 930;
 const CHEST_ROW = 6;
 const CHEST_BACK = 5;
 const FREE_ZONE = 560;
+/** From the last guardian to the goal line: places can still change here. */
+const LAST_RUN = 900;
 export const FIELD = 50;
 export const QUOTA = 30;
 /** Rivals' cruising speed: the slowest and how much faster the best are. */
@@ -59,6 +61,7 @@ export class LandStage extends Arena {
   constructor(host: Host) {
     super(host, 0, 11);
     this.koMode = true;
+    this.showDone = true;
     const st = this.st;
     this.len = Math.round(10500 * st.course);
     const L = this.len;
@@ -66,7 +69,7 @@ export class LandStage extends Arena {
     this.gates = [
       { x: Math.round(L / 3), boss: null, art: en.ghost[0], need: 1000, size: 112, tier: 0, first: true, passed: 0 },
       { x: Math.round((L * 2) / 3), boss: null, art: en.ghost[1], need: 3200, size: 124, tier: 1, first: true, passed: 0 },
-      { x: L - 110, boss: null, art: en.landBoss[0], need: 2000, size: 176, tier: 2, first: true, passed: 0 },
+      { x: L - LAST_RUN, boss: null, art: en.landBoss[0], need: 2000, size: 176, tier: 2, first: true, passed: 0 },
     ];
     const h = this.hero;
     h.x = 150;
@@ -154,7 +157,7 @@ export class LandStage extends Arena {
 
   private follow(k: number): void {
     const h = this.hero;
-    const tx = clamp(h.x - this.vw * 0.38, 0, this.len + 260 - this.vw);
+    const tx = this.outro ? h.x - this.vw * 0.38 : clamp(h.x - this.vw * 0.38, 0, this.len + 260 - this.vw);
     const ty = clamp(h.y - this.vh / 2, 0, H - this.vh);
     this.camX += (tx - this.camX) * k;
     this.camY += (ty - this.camY) * k;
@@ -192,8 +195,9 @@ export class LandStage extends Arena {
       h.boost = Math.max(h.boost, 1.2);
       sfx('gate');
       sample('heal', 0.5);
-      hud.banner(gate.tier === 2 ? 'GOAL へ！' : '関門突破！', `${gate.passed}番目に通過`, 'good');
-      hud.objective(gate.tier === 2 ? 'ゴールラインへ！' : '30位以内でゴールせよ！');
+      hud.banner(gate.tier === 2 ? 'ゴールラインへ！' : '関門突破！', gate.tier === 2 ? '順位が決まるのはゴールライン。最後まで走り抜け！' : `${gate.passed}番目に通過`, 'good');
+      hud.objective(gate.tier === 2 ? 'ゴールラインを越えるまで順位は決まらない！' : '30位以内でゴールせよ！');
+      if (gate.tier === 2) hud.say(`${this.heroArt.name}が最後の番人を突破！ ゴールラインまでの直線勝負です！`, 3);
       earn(['gate1', 'gate2', 'gate3'][gate.tier]);
       this.grant(1);
     }
@@ -324,7 +328,15 @@ export class LandStage extends Arena {
 
     // the rivals: who has finished, and where the player stands
     for (const r of this.rivals) {
-      if (!r.done && r.x >= L) {
+      if (r.done) {
+        // over the line: they run on down the road
+        r.x += r.pace * 0.8 * dt;
+        r.bob += dt * 11;
+        r.moving = true;
+        r.flip = true;
+        continue;
+      }
+      if (r.x >= L) {
         r.done = true;
         this.passed += 1;
         r.place = this.passed;
@@ -375,7 +387,19 @@ export class LandStage extends Arena {
     // the end of the race, one way or the other
     if (h.x >= L) {
       const place = this.passed + 1;
-      this.finished = true;
+      this.passed += 1;
+      this.place = place;
+      this.outro = true;
+      for (const e of this.enemies) {
+        if (!e.dead && !e.boss) this.puff(e.x, e.y, '#ffffff', 3);
+        e.dead = true;
+      }
+      this.ebullets.length = 0;
+      h.ko = h.frozen = 0;
+      hud.rank(place, FIELD, this.passed, QUOTA);
+      hud.boss(null);
+      hud.objective('');
+      hud.say(`ゴーーール！ ${this.heroArt.name}、${place}位でフィニッシュ！`, 3);
       this.result = { place, field: FIELD, quota: QUOTA, qualified: place <= QUOTA, progress: 1, gates: 3 };
       earn('goal');
       if (place <= QUOTA) earn('land30');
@@ -394,7 +418,7 @@ export class LandStage extends Arena {
 
     hud.gauge(clamp(h.hp / h.maxHp, 0, 1), h.ko > 0 ? `気絶 ${h.ko.toFixed(1)}` : h.frozen > 0 ? `反則 ${h.frozen.toFixed(1)}` : `${Math.max(0, Math.ceil(h.hp))}`);
     hud.sub(1 - h.dashCd / (1.4 * this.st.dashCd));
-    hud.progress(prog, this.gates.slice(0, 2).map((g) => g.x / L));
+    hud.progress(prog, this.gates.map((g) => g.x / L));
     hud.level(this.run.level, this.run.xp / xpNeed(this.run.level));
     hud.gum(this.run.gum);
     const near = gate && h.x > gate.x - 620 ? gate : null;
@@ -405,6 +429,40 @@ export class LandStage extends Arena {
       hud.banner('関門', `${near.art.name}に ${near.need} ダメージを与えて通過せよ`, 'warn');
       hud.objective('番人を攻撃して通行証を勝ち取れ！（ストライクも有効）');
     }
+  }
+
+  /** Past the line: the hero jogs on down the road, and the teams behind keep coming in. */
+  protected afterglow(dt: number): void {
+    const h = this.hero;
+    const L = this.len;
+    h.x += h.speed * 0.9 * dt;
+    h.y += (H / 2 - h.y) * Math.min(1, dt * 0.8);
+    h.vx = h.vy = 0;
+    h.moving = true;
+    h.flip = true;
+    h.bob += dt * 11;
+    h.inv = 0;
+    if (Math.random() < dt * 14) this.puff(h.x - 40 + Math.random() * 80, h.y - 60 - Math.random() * 60, ['#ffe45c', '#ff7a9c', '#7dffb0', '#37c8f2'][Math.floor(Math.random() * 4)], 2, 160);
+    for (const r of this.rivals) {
+      if (r.done) {
+        r.x += r.pace * 0.8 * dt;
+        r.bob += dt * 11;
+        continue;
+      }
+      if (r.ko > 0) {
+        r.ko = Math.max(0, r.ko - dt);
+        continue;
+      }
+      this.rivalAI(r, dt);
+      if (r.x >= L) {
+        r.done = true;
+        r.flip = true;
+        this.passed += 1;
+        r.place = this.passed;
+        this.host.hud.rank(this.place, FIELD, Math.min(this.passed, QUOTA), QUOTA);
+      }
+    }
+    this.follow(1 - Math.pow(0.001, dt));
   }
 
   /** Is this runner shielded by a mirror? (Says so when it matters.) */

@@ -17,7 +17,7 @@ import type { Host, Stage, StageResult } from './stages/stage';
 import { treeScreen } from './ui/tree';
 import { createHud } from './ui/hud';
 import {
-  clearCard, hangarScreen, initScreens, introCard, levelUpScreen, outScreen, pauseScreen, resultScreen, screenLayer, selectScreen, titleScreen,
+  clearCard, goalScreen, hangarScreen, initScreens, introCard, levelUpScreen, outScreen, pauseScreen, resultScreen, screenLayer, selectScreen, titleScreen,
 } from './ui/screens';
 
 const app = document.getElementById('app')!;
@@ -56,6 +56,8 @@ let settle: ((r: 'done' | 'restart' | 'quit') => void) | null = null;
 
 const PAD: Record<StageId, [string, string]> = { land: ['ダッシュ', 'ストライク'], sea: ['銛', ''], sky: ['ブースト', 'ロール'] };
 let lastResult: StageResult | null = null;
+/** The finish-line overlay of the race in progress (shown once). */
+let outro: { index: number; run: Run; shown: boolean } | null = null;
 (window as unknown as { __log: unknown[] }).__log = [];
 
 async function makeStage(id: StageId, host: Host): Promise<Stage> {
@@ -103,17 +105,19 @@ async function playStage(run: Run, index: number): Promise<'done' | 'restart' | 
   playBgm(id);
   setPad(true, PAD[id][0], PAD[id][1]);
   await introCard(id, index, run, debug.quick);
+  outro = { index, run, shown: false };
   playing = true;
   const result = await new Promise<'done' | 'restart' | 'quit'>((res) => (settle = res));
   playing = false;
   settle = null;
   setPad(false);
   lastResult = stage.result ?? null;
+  (window as unknown as { __ft: unknown }).__ft = (stage as unknown as { finishTimes?: number[] }).finishTimes;
   (window as unknown as { __log: unknown[] }).__log.push({ stage: id, time: Math.round(stage.time * 10) / 10, result: lastResult, kills: run.kills, lv: run.level, downs: run.downs });
   if (result === 'done') {
     run.splits[index] = stage.time;
     hud.clock(stage.time, baseTime + stage.time);
-    if (!lastResult || lastResult.qualified) await clearCard(index, run, lastResult ?? undefined);
+    if (!outro.shown && (!lastResult || lastResult.qualified)) await clearCard(index, run, lastResult ?? undefined);
   }
   stage.dispose();
   stage = null;
@@ -142,6 +146,7 @@ async function runOnce(heroes: [Hero, Hero, Hero]): Promise<'again' | 'team' | '
   }
   (window as unknown as { __mct: unknown }).__mct = { run, meta: meta(), get stage() { return stage; }, get last() { return lastResult; } };
   let land: StageResult | null = null;
+  let sea: StageResult | null = null;
   let cleared = 0;
   let out: StageId | null = null;
   for (let i = from; i < STAGES.length; i++) {
@@ -149,6 +154,7 @@ async function runOnce(heroes: [Hero, Hero, Hero]): Promise<'again' | 'team' | '
     if (r === 'restart') return 'again';
     if (r === 'quit') return 'quit';
     if (STAGES[i] === 'land') land = lastResult;
+    if (STAGES[i] === 'sea') sea = lastResult;
     if (lastResult && !lastResult.qualified) {
       out = STAGES[i];
       break;
@@ -157,7 +163,7 @@ async function runOnce(heroes: [Hero, Hero, Hero]): Promise<'again' | 'team' | '
   }
   if (cleared >= 2) earn('sea');
   if (cleared >= 3) earn('sky');
-  const pay = payout(run, land, cleared >= 2, cleared >= 3, featsBefore);
+  const pay = payout(run, land, sea, cleared >= 3, featsBefore);
   playBgm('title', 0.35);
   if (out && lastResult) await outScreen(out, lastResult, pay);
   else if (cleared >= 3) await resultScreen(run, pay);
@@ -182,6 +188,13 @@ async function boot(): Promise<void> {
         }
         hud.clock(stage.time, baseTime + stage.time);
         if (stage.finished && settle) settle('done');
+        else if (stage.outro && stage.result && outro && !outro.shown && settle) {
+          // the place is settled: the race runs on behind the result until the player moves on
+          outro.shown = true;
+          setPad(false);
+          if (debug.quick) settle('done');
+          else void goalScreen(STAGES[outro.index], outro.index, outro.run, stage.result, stage.time).then(() => settle?.('done'));
+        }
       }
       stage.render();
     }
