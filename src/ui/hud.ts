@@ -221,15 +221,15 @@ export function createHud(root: HTMLElement): HudView {
       }
       for (let i = 0; i < all.length; i++) dotEls[i].style.left = `${Math.min(1, all[i]) * 100}%`;
     },
-    rank(p, total, passed, q) {
-      const key = `${p}/${total}/${passed}/${q}`;
+    rank(p, total, passed, q, note) {
+      const key = `${p}/${total}/${passed}/${q}/${note ?? ''}`;
       if (key === lastRank) return;
       const was = Number(lastRank.split('/')[0]) || p;
       lastRank = key;
       rankbox.classList.add('race');
       place.textContent = String(p);
       field.textContent = `位 / ${total}`;
-      quota.textContent = `通過 ${passed}/${q}`;
+      quota.textContent = note ?? `通過 ${passed}/${q}`;
       rankbox.classList.toggle('safe', p <= q);
       quota.classList.toggle('tight', q - passed <= 5);
       if (p !== was) {

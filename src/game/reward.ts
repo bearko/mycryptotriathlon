@@ -6,7 +6,7 @@ import type { StageResult } from '../stages/stage';
 
 export interface Payout { lines: { label: string; ce: number }[]; total: number; mult: number; feats: Feat[] }
 
-export function payout(run: Run, land: StageResult | null, sea: StageResult | null, skyClear: boolean, featsBefore: string[]): Payout {
+export function payout(run: Run, land: StageResult | null, sea: StageResult | null, sky: StageResult | null, featsBefore: string[]): Payout {
   const lines: { label: string; ce: number }[] = [];
   if (land) {
     lines.push({ label: `走破 ${Math.round(land.progress * 100)}%`, ce: Math.round(land.progress * 40) });
@@ -20,7 +20,11 @@ export function payout(run: Run, land: StageResult | null, sea: StageResult | nu
     if (sea.gates) lines.push({ label: `遺物 ×${sea.gates}`, ce: sea.gates * 25 });
     if (sea.qualified) lines.push({ label: `秘宝 ${sea.place}位`, ce: 150 + (sea.quota - sea.place) * 6 });
   }
-  if (skyClear) lines.push({ label: '空をクリア', ce: 250 });
+  if (sky) {
+    lines.push({ label: `空 ${sky.place}位`, ce: (sky.field - sky.place) * 25 });
+    if (sky.gates) lines.push({ label: `撃墜 ×${sky.gates}`, ce: sky.gates * 30 });
+    if (sky.qualified) lines.push({ label: '最後の1機', ce: 300 });
+  }
   const mult = stats().ce;
   const total = Math.round(lines.reduce((a, l) => a + l.ce, 0) * mult);
   const m = meta();

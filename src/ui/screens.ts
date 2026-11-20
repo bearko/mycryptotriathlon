@@ -52,9 +52,9 @@ const RULES: Record<StageId, { goal: string; pc: string; touch: string }> = {
     touch: '左スティックで移動 ／ A で銛（審判の円の中でライバルに当てると反則） ／ 遺物・秘宝のそばで自動で発掘',
   },
   sky: {
-    goal: '集めたエクステンションの戦闘機で、宇宙の果てまで飛べ',
-    pc: '移動 WASD ／ ブースト Space ／ ロール Shift（弾をはじく）',
-    touch: '左スティックで移動 ／ A でブースト ／ B でロール',
+    goal: '10機のバトルロワイヤル。弾は前にしか飛ばない。相手のうしろを取って撃ち、最後の1機になれ',
+    pc: '移動 WASD ／ ブースト Space（前へ出る） ／ ブレーキ Shift（うしろへ下がる。出だしはロール） ／ どちらも同じエネルギーを使う',
+    touch: '左スティックで移動 ／ A でブースト（前へ出る） ／ B でブレーキ（うしろへ下がる。出だしはロール） ／ どちらも同じエネルギーを使う',
   },
 };
 
@@ -72,7 +72,7 @@ export function titleScreen(): Promise<void> {
         <span class="l-sky"><b>空</b>最後の1組へ</span>
       </div>
       <button class="btn big" id="t-start">START</button>
-      <p class="title-best">${meta().runs ? `挑戦 <b>${meta().runs}</b> 回 ／ ${meta().bestPlace ? `陸の最高 <b>${meta().bestPlace}位</b>` : `陸の最長 <b>${Math.round(meta().bestProgress * 100)}%</b>`}${s.best !== null ? ` ／ 完走ベスト <b>${fmtTime(s.best)}</b>` : ''}` : 'はじめての挑戦'}</p>
+      <p class="title-best">${meta().runs ? `挑戦 <b>${meta().runs}</b> 回 ／ ${meta().bestPlace ? `陸の最高 <b>${meta().bestPlace}位</b>` : `陸の最長 <b>${Math.round(meta().bestProgress * 100)}%</b>`}${s.best !== null ? ` ／ 優勝ベスト <b>${fmtTime(s.best)}</b>` : ''}` : 'はじめての挑戦'}</p>
       <button class="btn ghost small" id="t-about">このゲームについて</button>
     </div>
     <img class="title-chris" src="${cat.chars.chrisCheer}" alt="">
@@ -535,8 +535,8 @@ export function resultScreen(run: Run, pay?: Payout): Promise<After> {
   }).join('');
   const el = open('result', `
     <div class="result-box">
-      <p class="fin">FINISH</p>
-      ${record ? `<p class="record">${prev === null ? '初完走！' : '自己ベスト更新！'}</p>` : ''}
+      <p class="fin">CHAMPION ― 3 種目を制した</p>
+      ${record ? `<p class="record">${prev === null ? '初優勝！' : '自己ベスト更新！'}</p>` : ''}
       <p class="total">${fmtTime(total)}</p>
       <p class="vs">${prev !== null ? `これまでのベスト ${fmtTime(prev)}（${fmtDelta(total - prev)}）` : '&nbsp;'}</p>
       <ul class="splits">${rows}</ul>
@@ -593,11 +593,11 @@ export function outScreen(stage: StageId, res: StageResult, pay: Payout): Promis
   const left = Math.round((1 - res.progress) * 3000);
   const el = open(`outrace ${stage}`, `
     <div class="out-box">
-      <p class="fin">${STAGE_NAME[stage]}・予選</p>
-      <h2>${res.progress >= 1 ? '通過ならず…' : stage === 'sea' ? '秘宝が尽きた！' : '時間切れ！'}</h2>
-      <p class="place"><b>${res.place}</b>位 <small>/ ${res.field}組（通過は ${res.quota}位まで）</small></p>
+      <p class="fin">${STAGE_NAME[stage]}・${stage === 'sky' ? '決勝' : '予選'}</p>
+      <h2>${res.progress >= 1 ? '通過ならず…' : stage === 'sky' ? '撃墜された…' : stage === 'sea' ? '秘宝が尽きた！' : '時間切れ！'}</h2>
+      <p class="place"><b>${res.place}</b>位 <small>/ ${res.field}組（${stage === 'sky' ? '優勝は 1 組だけ' : `通過は ${res.quota}位まで`}）</small></p>
       <div class="howfar"><i style="width:${res.progress * 100}%"></i>${stage === 'land' ? `<u style="left:${m.bestProgress * 100}%"></u>` : ''}</div>
-      <p class="left">${res.progress >= 1 ? 'ゴールはできた。あとは順位だ' : stage === 'sea' ? (res.progress > 0.9 ? '秘宝まで、あと一歩だった' : `最深部まで あと ${Math.round((1 - res.progress) * 420)}m`) : `ゴールまで あと ${left}m`}</p>
+      <p class="left">${res.progress >= 1 ? 'ゴールはできた。あとは順位だ' : stage === 'sky' ? (res.place === 2 ? 'あと1機だった！' : `優勝まで あと ${res.place - 1}機`) : stage === 'sea' ? (res.progress > 0.9 ? '秘宝まで、あと一歩だった' : `最深部まで あと ${Math.round((1 - res.progress) * 420)}m`) : `ゴールまで あと ${left}m`}</p>
       <ul class="pay">${pay.lines.map((l) => `<li><span>${l.label}</span><b>+${l.ce}</b></li>`).join('')}
         ${pay.mult !== 1 ? `<li class="mul"><span>賞金アップ</span><b>×${pay.mult.toFixed(2)}</b></li>` : ''}
         <li class="sum"><span><img src="${cat.icons.ce}" alt=""> 獲得 CE</span><b>+${pay.total}</b></li>

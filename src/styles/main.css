@@ -673,3 +673,10 @@ button { font-family: inherit; color: inherit; }
 }
 .tn-foot #tn-apply:not(:disabled) { background: linear-gradient(180deg, #ffe07a, #e0a520); color: #1b1300; border-color: #fff3c0; animation: tnpulse 1s ease-in-out infinite; }
 @keyframes tnpulse { 50% { filter: brightness(1.25); } }
+
+/* the sky: a radar for what is behind, and the shout when someone is on the tail */
+.sky-ov { position: absolute; inset: 0; pointer-events: none; }
+.sky-radar { position: absolute; right: calc(10px + var(--safe-r, 0px)); top: clamp(58px, 16vh, 84px); width: clamp(64px, 16vh, 96px); border: 2px solid #ffffff55; border-radius: 6px; image-rendering: pixelated; }
+.sky-warn { position: absolute; left: 50%; bottom: clamp(64px, 20vh, 120px); transform: translateX(-50%); padding: 4px 14px; background: #c81e4acc; border: 2px solid #ff8fa3; border-radius: 20px; color: #fff; font-size: clamp(12px, 3.4vh, 16px); white-space: nowrap; opacity: 0; text-shadow: 0 2px 0 #000a; }
+.sky-warn.on { opacity: 1; animation: skywarn .4s steps(2) infinite; }
+@keyframes skywarn { 50% { background: #ff5c7acc; } }

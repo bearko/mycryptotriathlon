@@ -21,3 +21,4 @@
 - レベルアップのカードは、押すのをやめて少し待つまで選べない（`levelUpScreen` の `armed`）。連打対策なので外さない。
 - 海は 30 組・先着 10 組（`sea.ts`）。門は走者ごと（`Runner.gate`）で、その深さの遺物を自分で掘ると通れる。ライバルの道順は `plan`、動きは `rivalAI`（画面の外は壁もエネミーも見ない簡略版）。難度は `PACE_MIN`・`PACE_SPAN`・`DIG_MIN`・`DIG_SPAN`。
 - 空の機体は `src/game/tuning.ts`（売却・ランクの値段・武装・`tuneStats`）と `screens.ts` の `tuneScreen`。空のレースが読むのは `tuneStats(run)` だけで、陸・海のエクステンション（`run.slots`）は空では使わない。
+- 空は 10 機のバトルロワイヤル（`sky.ts`）。弾は前（-z）にしか飛ばず、位置取り（`z`）はブーストとブレーキで変える。うしろにいる間はエネルギーが回復しない（`charge`）— 全機がうしろの壁に貼りつくのを防ぐ決まりなので外さない。ライバルは `scan`（ねらう相手）→ `decide`（行きたい場所）→ `rivalAI`。難度は `RIVAL_HP`・`RIVAL_DMG`・`PLAYER_X`（自機の弾がライバルに通る割合）・`RIVAL_X`。`RIVAL_DMG` は 2 変えるだけで勝率が大きく動くので、変えたら自動操縦で 8 回は回す。

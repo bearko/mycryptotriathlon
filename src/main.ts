@@ -54,7 +54,7 @@ let paused = false;
 let baseTime = 0;
 let settle: ((r: 'done' | 'restart' | 'quit') => void) | null = null;
 
-const PAD: Record<StageId, [string, string]> = { land: ['ダッシュ', 'ストライク'], sea: ['銛', ''], sky: ['ブースト', 'ロール'] };
+const PAD: Record<StageId, [string, string]> = { land: ['ダッシュ', 'ストライク'], sea: ['銛', ''], sky: ['ブースト', 'ブレーキ'] };
 let lastResult: StageResult | null = null;
 /** The finish-line overlay of the race in progress (shown once). */
 let outro: { index: number; run: Run; shown: boolean } | null = null;
@@ -148,6 +148,7 @@ async function runOnce(heroes: [Hero, Hero, Hero]): Promise<'again' | 'team' | '
   (window as unknown as { __mct: unknown }).__mct = { run, meta: meta(), get stage() { return stage; }, get last() { return lastResult; } };
   let land: StageResult | null = null;
   let sea: StageResult | null = null;
+  let sky: StageResult | null = null;
   let cleared = 0;
   let out: StageId | null = null;
   for (let i = from; i < STAGES.length; i++) {
@@ -156,6 +157,7 @@ async function runOnce(heroes: [Hero, Hero, Hero]): Promise<'again' | 'team' | '
     if (r === 'quit') return 'quit';
     if (STAGES[i] === 'land') land = lastResult;
     if (STAGES[i] === 'sea') sea = lastResult;
+    if (STAGES[i] === 'sky') sky = lastResult;
     if (lastResult && !lastResult.qualified) {
       out = STAGES[i];
       break;
@@ -164,7 +166,7 @@ async function runOnce(heroes: [Hero, Hero, Hero]): Promise<'again' | 'team' | '
   }
   if (cleared >= 2) earn('sea');
   if (cleared >= 3) earn('sky');
-  const pay = payout(run, land, sea, cleared >= 3, featsBefore);
+  const pay = payout(run, land, sea, sky, featsBefore);
   playBgm('title', 0.35);
   if (out && lastResult) await outScreen(out, lastResult, pay);
   else if (cleared >= 3) await resultScreen(run, pay);

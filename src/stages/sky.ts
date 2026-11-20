@@ -1,33 +1,67 @@
-// SKY: the gear gathered on land and under the sea becomes a fighter. Fly into the screen, from the
-// blue sky up into space, and bring down the last enemy at the end of the course.
+// SKY: the last ten teams, one fighter each, flying into the screen until one is left.
+// Guns only fire forward, so the fight is about position: brake to drop behind a rival and shoot, boost to
+// pull away from one. Both burn the same energy, and a fighter that spends none slides back to the middle of the pack.
+// Nobody can sit at the back: energy does not come back there. Out in front, exposed, it comes back fastest. The safe airspace narrows as the flight climbs from blue sky into space.
 
 import * as THREE from 'three';
 import { sample, sfx } from '../core/audio';
-import { cat, traitsOf, type Traits } from '../core/catalog';
+import { cat, traitsOf, type Hero, type Traits } from '../core/catalog';
 import { input } from '../core/input';
 import { clamp, lerp, makeRng, TAU, type Rng } from '../core/util';
-import { DOWN_PENALTY, levelMul, type Run } from '../game/run';
+import { earn, stats } from '../game/meta';
+import { levelMul, type Run } from '../game/run';
 import { DEFAULT_ARM, SKY_ARMS, tuneStats, type FighterStats } from '../game/tuning';
-import type { Host, Stage } from './stage';
+import type { Host, Stage, StageResult } from './stage';
 
 const BX = 12;
 const BY = 6.4;
 const SPAWN_Z = -280;
-const COURSE = 3000;
-const MID_AT = 0.5;
+const FIELD = 10;
+/** Half the depth of the pack: how far ahead or behind the middle a fighter can sit. It closes in with the ring. */
+const DEPTH0 = 34;
+const DEPTH1 = 14;
+/** The safe airspace starts to narrow, is at its smallest, and then nobody is safe anywhere. */
+const SHRINK_FROM = 25;
+const SHRINK_TO = 150;
+const RING_MIN = 0.42;
+const SUDDEN = 175;
+/** Rivals: hull, sting, and how much harder their shots land on each other than on the player. */
+/** Energy per second for a boost and for the brake, and how fast the brake drops a fighter back. */
+const BOOST_COST = 0.3;
+const BRAKE_COST = 0.42;
+const BRAKE_SPEED = 15;
+const RIVAL_HP = 420;
+const RIVAL_HP_SPAN = 420;
+const RIVAL_DMG = 11;
+const RIVAL_DMG_SPAN = 8;
+const RIVAL_X = 1.1;
+/** How much of the player's fire a rival hull shrugs off (the sky's creatures take all of it). */
+const PLAYER_X = 0.25;
 
+interface Fighter {
+  me: boolean; name: string; skill: number;
+  g: THREE.Group; flame: THREE.Sprite; tag: THREE.Sprite | null; tagCv: HTMLCanvasElement | null; tagKey: string;
+  x: number; y: number; z: number; vx: number; vy: number; vz: number; r: number;
+  hp: number; maxHp: number; inv: number; bump: number; rollT: number; rollCd: number; rollDir: number; alive: boolean;
+  tgt: Fighter | null; tail: Fighter | null; think: number; fireT: number; wob: number; dmg: number; top: number;
+  lastBy: Fighter | null; kills: number; boosting: boolean;
+  /** Rivals: energy for boosting and braking, and whether they are spending it on an attack right now. */
+  en: number; hunting: boolean;
+}
 interface Foe {
   s: THREE.Sprite; x: number; y: number; z: number; r: number; hp: number; max: number;
-  type: 'bagel' | 'letter' | 'heart' | 'mid' | 'boss';
-  t: number; fireT: number; bx: number; by: number; holdZ: number; flash: number; dead: boolean; boss: boolean;
-  bitCd: number; vx: number; vy: number; phase: number; name: string;
+  type: 'bagel' | 'letter' | 'heart';
+  t: number; fireT: number; bx: number; by: number; holdZ: number; flash: number; dead: boolean;
+  bitCd: number; name: string; vic: Fighter;
 }
+type Tgt = Foe | Fighter;
+const isFoe = (t: Tgt): t is Foe => 'type' in t;
+const gone = (t: Tgt) => (isFoe(t) ? t.dead : !t.alive);
 interface Block { m: THREE.Mesh; x: number; y: number; z: number; r: number; solid: boolean; spin: number }
 interface Ring { m: THREE.Mesh; x: number; y: number; z: number; taken: boolean }
-interface Shot { m: THREE.Object3D; x: number; y: number; z: number; vx: number; vy: number; vz: number; dmg: number; life: number; target: Foe | null; live: boolean }
+interface Shot { m: THREE.Object3D; x: number; y: number; z: number; vx: number; vy: number; vz: number; dmg: number; life: number; target: Tgt | null; live: boolean; by: Fighter }
 interface EShot { s: THREE.Sprite; x: number; y: number; z: number; vx: number; vy: number; vz: number; dmg: number; live: boolean }
 interface Fx { s: THREE.Sprite; t: number; max: number; size: number }
-interface Ev { at: number; kind: 'blocks' | 'wave' | 'rings'; seed: number }
 
 function glowTexture(inner: string, outer: string): THREE.CanvasTexture {
   const c = document.createElement('canvas');
@@ -63,19 +97,20 @@ function ringTexture(): THREE.CanvasTexture {
 export class SkyStage implements Stage {
   time = 0;
   finished = false;
+  result?: StageResult;
   private run: Run;
   private traits: Traits;
   private rng: Rng;
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
   private camera = new THREE.PerspectiveCamera(62, 1, 0.1, 700);
-  private ship = new THREE.Group();
-  private flame: THREE.Sprite;
+  private flame!: THREE.Sprite;
   private reticle: THREE.Sprite;
   private lock: THREE.Sprite;
   private stars: THREE.Points;
   private lines: THREE.Mesh[] = [];
   private clouds: THREE.Sprite[] = [];
+  private frames: THREE.LineLoop[] = [];
   private bitSprites: THREE.Sprite[] = [];
   private tex = new Map<string, THREE.Texture>();
   private loader = new THREE.TextureLoader();
@@ -86,35 +121,32 @@ export class SkyStage implements Stage {
   private laserGeo = new THREE.BoxGeometry(0.18, 0.18, 2.6);
   private laserMat = new THREE.MeshBasicMaterial({ color: 0x9dffb0 });
   private spreadMat = new THREE.MeshBasicMaterial({ color: 0xffd166 });
+  private rivalMat = new THREE.MeshBasicMaterial({ color: 0xff7a5c });
   private missileGeo = new THREE.BoxGeometry(0.34, 0.34, 1.2);
   private missileMat = new THREE.MeshBasicMaterial({ color: 0x8fb4ff });
   private ringGeo = new THREE.TorusGeometry(2.6, 0.22, 6, 20);
   private ringMat = new THREE.MeshBasicMaterial({ color: 0xffe45c });
+  private frameMat = new THREE.LineBasicMaterial({ color: 0xff5cc8, transparent: true, opacity: 0.55, fog: false });
 
-  private px = 0;
-  private py = 0;
-  private vx = 0;
-  private vy = 0;
-  private hp = 100;
-  private maxHp = 100;
-  private inv = 0;
+  private me!: Fighter;
+  private fighters: Fighter[] = [];
   private boost = 0.6;
-  private boosting = false;
-  private rollT = 0;
-  private rollCd = 0;
-  private rollDir = 1;
   private speed = 30;
-  private baseSpeed = 30;
-  private dist = 0;
-  private hold: Foe | null = null;
-  private midDone = false;
-  private bossCalled = false;
   private st: FighterStats;
   private fireT = 0;
   private missileT = 1;
   private pulseT = 2;
   private bitAng = 0;
   private shake = 0;
+  /** How much of the airspace is left (1 = all of it), and the half-depth of the pack right now. */
+  private ring = 1;
+  private depth = DEPTH0;
+  private stormT = 0;
+  private told = 0;
+  private evT = 3;
+  private evN = 0;
+  private chatT = 9;
+  private botHunt = false;
 
   private foes: Foe[] = [];
   private blocks: Block[] = [];
@@ -122,20 +154,20 @@ export class SkyStage implements Stage {
   private shots: Shot[] = [];
   private eshots: EShot[] = [];
   private fx: Fx[] = [];
-  private events: Ev[] = [];
-  private evi = 0;
   private bg = new THREE.Color();
+  private ov: HTMLDivElement;
+  private radar: HTMLCanvasElement;
+  private warn: HTMLDivElement;
   private onResize = () => this.resize();
 
   constructor(private host: Host) {
     this.run = host.run;
     const pilot = this.run.heroes[2];
     this.traits = traitsOf(pilot);
-    this.rng = makeRng(host.seed + 37);
+    // unlike the courses of the land and the sea, no two dogfights are alike
+    this.rng = makeRng(host.seed + 37 + Math.floor(Math.random() * 1e6));
     this.st = tuneStats(this.run);
-    this.maxHp = this.st.hp;
-    this.hp = this.maxHp;
-    this.baseSpeed = 28 * (0.9 + 0.1 * this.traits.agi) + Math.min(9, this.st.engine * 0.13);
+    this.speed = 28 * (0.9 + 0.1 * this.traits.agi);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
     this.renderer.domElement.className = 'game-canvas';
@@ -150,40 +182,40 @@ export class SkyStage implements Stage {
     this.glowWarm = glowTexture('#ffffff', '#ffa040');
     this.glowWhite = glowTexture('#ffffff', '#9fd0ff');
 
-    // ---- the fighter: a small low-poly hull, the pilot on top, and the chosen gear bolted on
-    const hullMat = new THREE.MeshLambertMaterial({ color: 0xe8eef7, flatShading: true });
-    const wingMat = new THREE.MeshLambertMaterial({ color: 0x5878c0, flatShading: true });
-    const dark = new THREE.MeshLambertMaterial({ color: 0x2b3350, flatShading: true });
-    const hull = new THREE.Mesh(new THREE.ConeGeometry(0.7, 3.4, 5), hullMat);
-    hull.rotation.x = -Math.PI / 2;
-    this.ship.add(hull);
-    for (const sgn of [-1, 1]) {
-      const wing = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.1, 1), wingMat);
-      wing.position.set(sgn * 1.25, -0.05, 0.6);
-      wing.rotation.y = sgn * -0.32;
-      wing.rotation.z = sgn * 0.08;
-      this.ship.add(wing);
-      const gun = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 1.3), dark);
-      gun.position.set(sgn * 1.9, 0, 0.1);
-      this.ship.add(gun);
+    // ---- the ten fighters
+    const st = stats();
+    const mine = new Set(this.run.heroes.map((h) => h.id));
+    const pool: Hero[] = cat.heroes.filter((h) => !mine.has(h.id));
+    const wing = [0x5878c0, 0xc05858, 0x58a06a, 0xb08a3a, 0x8a58c0, 0x3aa0b0, 0xc0589a, 0x7a8a3a, 0x4a5a9a, 0xb06a3a];
+    this.me = this.addFighter(pilot, true, 0, wing[0]);
+    this.me.maxHp = this.me.hp = this.st.hp;
+    this.me.top = 17 * (0.9 + 0.1 * this.traits.agi) * (1 + this.st.engine / 260);
+    for (let i = 1; i < FIELD; i++) {
+      const art = pool.splice(Math.floor(this.rng() * pool.length), 1)[0];
+      const skill = (i - 1) / (FIELD - 2);
+      const r = this.addFighter(art, false, skill, wing[i]);
+      r.maxHp = r.hp = Math.round((RIVAL_HP + RIVAL_HP_SPAN * skill) * (1 + st.rival));
+      r.dmg = (RIVAL_DMG + RIVAL_DMG_SPAN * skill) * (1 + st.rival);
+      r.top = 10 + 5 * skill;
     }
-    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.9, 0.8), wingMat);
-    fin.position.set(0, 0.45, 1.1);
-    this.ship.add(fin);
-    const pilotS = this.sprite(pilot.img, 1.35);
-    pilotS.position.set(0, 0.8, 0.1);
-    this.ship.add(pilotS);
-    const hard: [number, number, number][] = [[-2.5, 0.35, 0.8], [2.5, 0.35, 0.8], [-1.3, 0.45, 1.2], [1.3, 0.45, 1.2]];
+    // the grid: spread across the sky, the player a little behind the middle
+    const order = this.fighters.slice().sort(() => this.rng() - 0.5);
+    order.forEach((f, i) => {
+      f.x = ((i % 5) - 2) * 4.6 + (this.rng() - 0.5);
+      f.y = (i < 5 ? 2.4 : -2.4) + (this.rng() - 0.5);
+      f.z = f.me ? 4 : -14 + this.rng() * 28;
+    });
     // the weapons bought in the hangar, bolted on (the laser that comes with the hull sits on the nose)
+    const hard: [number, number, number][] = [[-2.5, 0.35, 0.8], [2.5, 0.35, 0.8], [-1.3, 0.45, 1.2], [1.3, 0.45, 1.2]];
     const nose = this.sprite(DEFAULT_ARM.img, 0.8);
     nose.position.set(0, 0.25, -1.2);
-    this.ship.add(nose);
+    this.me.g.add(nose);
     (this.run.tune?.arms ?? []).forEach((id, i) => {
       const arm = SKY_ARMS.find((a) => a.id === id);
       if (!arm || i > 3) return;
       const s = this.sprite(arm.img, 0.95);
       s.position.set(...hard[i]);
-      this.ship.add(s);
+      this.me.g.add(s);
       if (id === 'bits') {
         const n = 2 + Math.floor(this.st.bits / 30);
         for (let k = this.bitSprites.length; k < Math.min(5, n); k++) {
@@ -193,10 +225,7 @@ export class SkyStage implements Stage {
         }
       }
     });
-    this.flame = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowWarm, blending: THREE.AdditiveBlending, depthWrite: false }));
-    this.flame.position.set(0, -0.15, 1.7);
-    this.ship.add(this.flame);
-    this.scene.add(this.ship);
+    this.flame = this.me.flame;
 
     const rt = ringTexture();
     this.reticle = new THREE.Sprite(new THREE.SpriteMaterial({ map: rt, color: 0x9dffb0, transparent: true, opacity: 0.7, depthTest: false }));
@@ -205,6 +234,15 @@ export class SkyStage implements Stage {
     this.lock = new THREE.Sprite(new THREE.SpriteMaterial({ map: rt, color: 0xff5c7a, transparent: true, opacity: 0.9, depthTest: false }));
     this.lock.visible = false;
     this.scene.add(this.lock);
+
+    // ---- the edge of the safe airspace: frames that rush past, as wide as the airspace is now
+    const fg = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-1, -1, 0), new THREE.Vector3(1, -1, 0), new THREE.Vector3(1, 1, 0), new THREE.Vector3(-1, 1, 0)]);
+    for (let i = 0; i < 9; i++) {
+      const f = new THREE.LineLoop(fg, this.frameMat);
+      f.position.z = -i * 36;
+      this.scene.add(f);
+      this.frames.push(f);
+    }
 
     // ---- stars, speed lines and clouds
     const n = 700;
@@ -236,27 +274,112 @@ export class SkyStage implements Stage {
       this.clouds.push(s);
     }
 
-    // ---- the course: the same for everyone
-    const er = makeRng(host.seed + 41);
-    let at = 70;
-    let i = 0;
-    while (at < COURSE - 90) {
-      const p = at / COURSE;
-      const nearMid = Math.abs(p - MID_AT) < 0.03;
-      if (!nearMid) {
-        const cyc = i % 5;
-        const kind: Ev['kind'] = cyc === 0 || cyc === 3 ? 'wave' : cyc === 1 ? 'blocks' : cyc === 2 ? 'rings' : er() < 0.5 ? 'blocks' : 'wave';
-        this.events.push({ at, kind, seed: Math.floor(er() * 1e9) });
-        i++;
-      }
-      at += 58 - p * 14 + er() * 10;
-    }
+    // ---- what the 3D view cannot show: who is behind (a small radar), and a shout when someone is on the tail
+    this.ov = document.createElement('div');
+    this.ov.className = 'sky-ov';
+    this.ov.innerHTML = '<canvas class="sky-radar" width="96" height="132"></canvas><div class="sky-warn">▼ うしろに付かれた！ ブレーキで回りこめ</div>';
+    host.mount.appendChild(this.ov);
+    this.radar = this.ov.querySelector('canvas')!;
+    this.warn = this.ov.querySelector<HTMLDivElement>('.sky-warn')!;
 
     this.resize();
     window.addEventListener('resize', this.onResize);
     host.hud.slots([]);
-    host.hud.objective('敵を撃ち落として、宇宙の果てへ');
+    host.hud.objective('前にいる相手を撃て！ 最後の1機になるまで');
+    host.hud.say(`最終種目は空！ 残った${FIELD}機のバトルロワイヤルです！`, 3);
+    host.hud.say('弾は前にしか飛びません。ブレーキで相手のうしろを取りましょう', 2, 'ain');
+    host.hud.say('うしろにいる間はエネルギーが回復しません。前へ出るほど早く回復します', 2);
+    this.status();
     this.place(0);
+  }
+
+  private addFighter(art: Hero, me: boolean, skill: number, wingColor: number): Fighter {
+    const g = new THREE.Group();
+    const hullMat = new THREE.MeshLambertMaterial({ color: me ? 0xe8eef7 : 0xcfd6e6, flatShading: true });
+    const wingMat = new THREE.MeshLambertMaterial({ color: wingColor, flatShading: true });
+    const dark = new THREE.MeshLambertMaterial({ color: 0x2b3350, flatShading: true });
+    const hull = new THREE.Mesh(new THREE.ConeGeometry(0.7, 3.4, 5), hullMat);
+    hull.rotation.x = -Math.PI / 2;
+    g.add(hull);
+    for (const sgn of [-1, 1]) {
+      const wing = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.1, 1), wingMat);
+      wing.position.set(sgn * 1.25, -0.05, 0.6);
+      wing.rotation.y = sgn * -0.32;
+      wing.rotation.z = sgn * 0.08;
+      g.add(wing);
+      const gun = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 1.3), dark);
+      gun.position.set(sgn * 1.9, 0, 0.1);
+      g.add(gun);
+    }
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.9, 0.8), wingMat);
+    fin.position.set(0, 0.45, 1.1);
+    g.add(fin);
+    const pilotS = this.sprite(art.img, 1.35);
+    pilotS.position.set(0, 0.8, 0.1);
+    g.add(pilotS);
+    const flame = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowWarm, blending: THREE.AdditiveBlending, depthWrite: false }));
+    flame.position.set(0, -0.15, 1.7);
+    g.add(flame);
+    let tag: THREE.Sprite | null = null;
+    let tagCv: HTMLCanvasElement | null = null;
+    {
+      // a name and a hull bar over every rival, and a marker over the player's own fighter.
+      // They keep the same size on screen however far away the fighter is.
+      tagCv = document.createElement('canvas');
+      tagCv.width = 192;
+      tagCv.height = 48;
+      const tx = new THREE.CanvasTexture(tagCv);
+      tx.colorSpace = THREE.SRGBColorSpace;
+      tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: tx, transparent: true, depthTest: false, fog: false, sizeAttenuation: false }));
+      tag.scale.set(0.3, 0.075, 1);
+      tag.position.set(0, me ? 2.1 : 2.5, 0);
+      tag.renderOrder = 5;
+      g.add(tag);
+      if (me) {
+        const c = tagCv.getContext('2d')!;
+        c.font = 'bold 22px sans-serif';
+        c.textAlign = 'center';
+        c.lineWidth = 5;
+        c.strokeStyle = '#000';
+        c.strokeText('▼ YOU', 96, 30);
+        c.fillStyle = '#7dffb0';
+        c.fillText('▼ YOU', 96, 30);
+      }
+    }
+    this.scene.add(g);
+    const f: Fighter = {
+      me, name: art.name, skill, g, flame, tag, tagCv, tagKey: '',
+      x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, r: 1.5,
+      hp: 100, maxHp: 100, inv: 0, bump: 0, rollT: 0, rollCd: 0, rollDir: 1, alive: true,
+      tgt: null, tail: null, think: this.rng(), fireT: 1 + this.rng(), wob: this.rng() * TAU, dmg: 0, top: 12,
+      lastBy: null, kills: 0, boosting: false, en: 0.3 + this.rng() * 0.7, hunting: false,
+    };
+    this.fighters.push(f);
+    return f;
+  }
+
+  private drawTag(f: Fighter): void {
+    if (!f.tag || !f.tagCv || f.me) return;
+    const frac = clamp(f.hp / f.maxHp, 0, 1);
+    const hot = f.tgt === this.me && this.me.alive;
+    const key = `${Math.ceil(frac * 24)}${hot ? 'h' : ''}`;
+    if (key === f.tagKey) return;
+    f.tagKey = key;
+    const g = f.tagCv.getContext('2d')!;
+    g.clearRect(0, 0, 192, 48);
+    g.font = 'bold 20px sans-serif';
+    g.textAlign = 'center';
+    g.lineWidth = 5;
+    g.strokeStyle = '#000';
+    const name = f.name.length > 9 ? `${f.name.slice(0, 8)}…` : f.name;
+    g.strokeText(name, 96, 20);
+    g.fillStyle = hot ? '#ff8fa3' : '#ffffff';
+    g.fillText(name, 96, 20);
+    g.fillStyle = '#000';
+    g.fillRect(28, 28, 136, 12);
+    g.fillStyle = frac > 0.5 ? '#6dffa0' : frac > 0.25 ? '#ffd23f' : '#ff5c7a';
+    g.fillRect(30, 30, 132 * frac, 8);
+    (f.tag.material.map as THREE.CanvasTexture).needsUpdate = true;
   }
 
   private sprite(url: string, size: number): THREE.Sprite {
@@ -287,6 +410,7 @@ export class SkyStage implements Stage {
 
   dispose(): void {
     window.removeEventListener('resize', this.onResize);
+    this.ov.remove();
     this.scene.traverse((o) => {
       const m = o as THREE.Mesh;
       if (m.geometry) m.geometry.dispose();
@@ -299,7 +423,15 @@ export class SkyStage implements Stage {
     this.renderer.domElement.remove();
   }
 
-  // ------------------------------------------------------------------ spawning
+  private alive(): Fighter[] {
+    return this.fighters.filter((f) => f.alive);
+  }
+  private status(): void {
+    const n = this.alive().length;
+    this.host.hud.rank(n, FIELD, 0, 1, `残り ${n}機 ／ 撃墜 ${this.me.kills}`);
+  }
+
+  // ------------------------------------------------------------------ the sky's own creatures and wreckage
   private spawnFoe(type: Foe['type'], x: number, y: number, prog: number): Foe {
     const en = cat.enemies;
     const tier = clamp(Math.floor(prog * 6), 0, 5);
@@ -317,71 +449,50 @@ export class SkyStage implements Stage {
       hp = 72 * scale;
       size = 5;
       r = 2.3;
-    } else if (type === 'mid') {
-      art = en.skyMid[0];
-      hp = 2100;
-      size = 15;
-      r = 5.4;
-    } else if (type === 'boss') {
-      art = en.skyBoss[0];
-      hp = 5200;
-      size = 20;
-      r = 6.6;
     }
     const s = this.sprite(art.img, size);
     this.scene.add(s);
+    const live = this.alive();
     const f: Foe = {
       s, x, y, z: SPAWN_Z, r, hp, max: hp, type, t: 0, fireT: 1 + this.rng() * 1.5, bx: x, by: y,
-      holdZ: -48 - this.rng() * 34, flash: 0, dead: false, boss: type === 'mid' || type === 'boss', bitCd: 0,
-      vx: 0, vy: 0, phase: 0, name: art.name,
+      holdZ: -DEPTH0 - 18 - this.rng() * 30, flash: 0, dead: false, bitCd: 0, name: art.name,
+      vic: live[Math.floor(this.rng() * live.length)] ?? this.me,
     };
-    if (f.boss) f.holdZ = type === 'mid' ? -74 : -86;
     this.foes.push(f);
     return f;
   }
 
-  private doEvent(ev: Ev): void {
-    const r = makeRng(ev.seed);
-    const prog = ev.at / COURSE;
-    if (ev.kind === 'wave') {
-      const n = 3 + Math.floor(prog * 3.2);
-      const cx = (r() - 0.5) * 12;
-      const cy = (r() - 0.5) * 6;
+  /** Something new flies in: a flight of creatures, a field of wreckage, or a line of rings. */
+  private event(prog: number): void {
+    const r = this.rng;
+    const cyc = this.evN++ % 5;
+    const kind = cyc === 0 || cyc === 3 ? 'wave' : cyc === 1 ? 'blocks' : cyc === 2 ? 'rings' : r() < 0.5 ? 'blocks' : 'wave';
+    const rx = BX * this.ring;
+    const ry = BY * this.ring;
+    if (kind === 'wave') {
+      const n = 2 + Math.floor(prog * 2.4);
+      const cx = (r() - 0.5) * rx;
+      const cy = (r() - 0.5) * ry;
       const roll = r();
       const type: Foe['type'] = prog > 0.2 && roll < 0.25 ? 'heart' : roll < 0.6 ? 'bagel' : 'letter';
-      const shape = Math.floor(r() * 3);
-      const count = type === 'heart' ? Math.max(2, n - 2) : n;
-      for (let i = 0; i < count; i++) {
-        const k = i - (count - 1) / 2;
-        let x = cx + k * 4.2;
-        let y = cy;
-        if (shape === 1) y = cy + Math.abs(k) * 1.8 - 2;
-        if (shape === 2) {
-          x = cx + Math.cos((i / count) * TAU) * 5;
-          y = cy + Math.sin((i / count) * TAU) * 3.4;
-        }
-        const f = this.spawnFoe(type, clamp(x, -BX, BX), clamp(y, -BY, BY), prog);
+      for (let i = 0; i < n; i++) {
+        const k = i - (n - 1) / 2;
+        const f = this.spawnFoe(type, clamp(cx + k * 4.2, -rx, rx), clamp(cy + Math.abs(k) * 1.4 - 1, -ry, ry), prog);
         f.z = SPAWN_Z - i * 5;
       }
-    } else if (ev.kind === 'blocks') {
-      const n = 7 + Math.floor(prog * 9);
-      const lx = (r() - 0.5) * 16;
-      const ly = (r() - 0.5) * 8;
+    } else if (kind === 'blocks') {
+      const n = 5 + Math.floor(prog * 6);
       for (let i = 0; i < n; i++) {
-        const x = (r() - 0.5) * (BX * 2 + 6);
-        const y = (r() - 0.5) * (BY * 2 + 4);
-        const size = 2.2 + r() * 3;
-        if (Math.hypot(x - lx, y - ly) < 3.4 + size * 0.6) continue;
-        this.addBlock(x, y, SPAWN_Z - r() * 46, size, true, prog, r);
+        this.addBlock((r() - 0.5) * (rx * 2 + 4), (r() - 0.5) * (ry * 2 + 3), SPAWN_Z - r() * 46, 2.2 + r() * 2.6, true, prog, r);
       }
     } else {
-      const sx = (r() - 0.5) * 16;
-      const sy = (r() - 0.5) * 8;
+      const sx = (r() - 0.5) * rx * 1.4;
+      const sy = (r() - 0.5) * ry * 1.4;
       const dx = (r() - 0.5) * 7;
       const dy = (r() - 0.5) * 4;
       for (let i = 0; i < 3; i++) {
         const m = new THREE.Mesh(this.ringGeo, this.ringMat);
-        const ring: Ring = { m, x: clamp(sx + dx * i, -BX + 1, BX - 1), y: clamp(sy + dy * i, -BY + 1, BY - 1), z: SPAWN_Z - i * 26, taken: false };
+        const ring: Ring = { m, x: clamp(sx + dx * i, -rx + 1, rx - 1), y: clamp(sy + dy * i, -ry + 1, ry - 1), z: SPAWN_Z - i * 26, taken: false };
         this.scene.add(m);
         this.rings.push(ring);
       }
@@ -405,19 +516,27 @@ export class SkyStage implements Stage {
   }
 
   // ------------------------------------------------------------------ shooting
-  private addShot(x: number, y: number, z: number, vx: number, vy: number, vz: number, dmg: number, kind: 0 | 1 | 2, target: Foe | null): void {
-    const m = new THREE.Mesh(kind === 2 ? this.missileGeo : this.laserGeo, kind === 0 ? this.laserMat : kind === 1 ? this.spreadMat : this.missileMat);
+  private addShot(by: Fighter, x: number, y: number, z: number, vx: number, vy: number, vz: number, dmg: number, kind: 0 | 1 | 2 | 3, target: Tgt | null): void {
+    const m = new THREE.Mesh(kind === 2 ? this.missileGeo : this.laserGeo, kind === 0 ? this.laserMat : kind === 1 ? this.spreadMat : kind === 2 ? this.missileMat : this.rivalMat);
     this.scene.add(m);
-    this.shots.push({ m, x, y, z, vx, vy, vz, dmg, life: kind === 2 ? 2.4 : 1.5, target, live: true });
+    this.shots.push({ m, x, y, z, vx, vy, vz, dmg, life: kind === 2 ? 2.4 : 1.3, target, live: true, by });
   }
 
-  /** The enemy the nose is roughly pointing at (aim assist). */
-  private aimTarget(): Foe | null {
-    let best: Foe | null = null;
+  /** Everything in front of the player that can be shot: rivals first, then the sky's creatures. */
+  private ahead(): Tgt[] {
+    const me = this.me;
+    const out: Tgt[] = [];
+    for (const f of this.fighters) if (f.alive && !f.me && f.z < me.z - 3 && f.z > me.z - 120) out.push(f);
+    for (const f of this.foes) if (!f.dead && f.z < me.z - 6 && f.z > me.z - 190) out.push(f);
+    return out;
+  }
+  /** What the nose is roughly pointing at (aim assist). */
+  private aimTarget(): Tgt | null {
+    const me = this.me;
+    let best: Tgt | null = null;
     let bd = this.st.aim;
-    for (const f of this.foes) {
-      if (f.dead || f.z > -6 || f.z < -190) continue;
-      const d = Math.hypot(f.x - this.px, f.y - this.py) - f.r * 0.7;
+    for (const f of this.ahead()) {
+      const d = Math.hypot(f.x - me.x, f.y - me.y) - f.r * 0.7 - (isFoe(f) ? 0 : 0.6);
       if (d < bd) {
         bd = d;
         best = f;
@@ -426,8 +545,9 @@ export class SkyStage implements Stage {
     return best;
   }
 
-  private fireGuns(dt: number, target: Foe | null): void {
+  private fireGuns(dt: number, target: Tgt | null): void {
     const st = this.st;
+    const me = this.me;
     const lv = levelMul(this.run.level);
     const phys = this.traits.phy * lv * st.power;
     const mag = this.traits.int * lv * st.power;
@@ -436,21 +556,21 @@ export class SkyStage implements Stage {
       this.fireT = 1 / Math.min(11, 5 + st.laser / 9);
       const dmg = (8 + st.laser * 0.13) * phys;
       for (const sgn of [-1, 1]) {
-        const ox = this.px + sgn * 1.9;
+        const ox = me.x + sgn * 1.9;
         let vx = 0;
         let vy = 0;
         const vz = -230;
         if (target) {
-          const tt = (target.z - 0) / vz;
-          vx = (target.x - ox) / Math.max(0.08, tt);
-          vy = (target.y - this.py) / Math.max(0.08, tt);
+          const tt = Math.max(0.08, (target.z - me.z) / vz);
+          vx = (target.x - ox) / tt;
+          vy = (target.y - me.y) / tt;
         }
-        this.addShot(ox, this.py, -1.2, vx, vy, vz, dmg, 0, null);
+        this.addShot(me, ox, me.y, me.z - 1.2, vx, vy, vz, dmg, 0, null);
         if (st.spread > 0) {
           const sd = (6 + st.spread * 0.15) * phys;
           const fan = st.spread > 40 ? [0.09, 0.19] : [0.11];
-          for (const a of fan) this.addShot(ox, this.py, -1.2, vx + sgn * a * 230, vy, vz, sd, 1, null);
-          if (st.spread > 20) this.addShot(ox, this.py, -1.2, vx, vy + (sgn > 0 ? 1 : -1) * 0.09 * 230, vz, sd, 1, null);
+          for (const a of fan) this.addShot(me, ox, me.y, me.z - 1.2, vx + sgn * a * 230, vy, vz, sd, 1, null);
+          if (st.spread > 20) this.addShot(me, ox, me.y, me.z - 1.2, vx, vy + (sgn > 0 ? 1 : -1) * 0.09 * 230, vz, sd, 1, null);
         }
       }
       sfx('laser', 0.09);
@@ -458,14 +578,15 @@ export class SkyStage implements Stage {
     if (st.missile > 0) {
       this.missileT -= dt;
       if (this.missileT <= 0) {
-        const live = this.foes.filter((f) => !f.dead && f.z < -4 && f.z > -200);
+        const live = this.ahead();
         if (live.length) {
-          this.missileT = Math.max(0.55, 1.5 - st.missile / 90);
+          this.missileT = Math.max(0.7, 1.7 - st.missile / 90);
           const n = 1 + Math.floor(st.missile / 28);
-          live.sort((a, b) => b.z - a.z);
+          // rivals before creatures, the nearest first
+          live.sort((a, b) => Number(isFoe(a)) - Number(isFoe(b)) || b.z - a.z);
           for (let i = 0; i < n; i++) {
             const t = live[i % live.length];
-            this.addShot(this.px, this.py + 0.4, -0.5, (i - (n - 1) / 2) * 16, 14, -70, (20 + st.missile * 0.55) * mag, 2, t);
+            this.addShot(me, me.x, me.y + 0.4, me.z - 0.5, (i - (n - 1) / 2) * 16, 14, -70, (16 + st.missile * 0.45) * mag, 2, t);
           }
           sfx('magic', 0.15);
         } else {
@@ -476,24 +597,38 @@ export class SkyStage implements Stage {
     if (st.pulse > 0) {
       this.pulseT -= dt;
       if (this.pulseT <= 0) {
+        // the one weapon that also reaches behind: it answers a rival sitting on the tail
         let any = false;
-        const dmg = (34 + st.pulse * 1.3) * mag;
+        const dmg = (30 + st.pulse * 1.1) * mag;
         for (const f of this.foes) {
-          if (f.dead || f.z < -110 || f.z > 6) continue;
-          if (Math.hypot(f.x - this.px, f.y - this.py) < 11 + f.r) {
+          if (f.dead || Math.abs(f.z - me.z) > 60) continue;
+          if (Math.hypot(f.x - me.x, f.y - me.y) < 11 + f.r) {
             any = true;
-            this.hitFoe(f, dmg);
+            this.hitFoe(f, dmg, me);
+          }
+        }
+        for (const f of this.fighters) {
+          if (!f.alive || f.me || Math.abs(f.z - me.z) > 30) continue;
+          if (Math.hypot(f.x - me.x, f.y - me.y) < 9) {
+            any = true;
+            this.hurtFighter(f, dmg * PLAYER_X, me);
           }
         }
         for (const b of this.eshots) {
-          if (b.live && Math.hypot(b.x - this.px, b.y - this.py) < 9 && b.z > -40) {
+          if (b.live && Math.hypot(b.x - me.x, b.y - me.y) < 9 && Math.abs(b.z - me.z) < 40) {
             b.live = false;
             any = true;
           }
         }
+        for (const s of this.shots) {
+          if (s.live && !s.by.me && Math.hypot(s.x - me.x, s.y - me.y) < 8 && Math.abs(s.z - me.z) < 30) {
+            s.live = false;
+            any = true;
+          }
+        }
         if (any) {
-          this.pulseT = Math.max(2, 4.6 - st.pulse / 40);
-          this.boom(this.px, this.py, -6, 26, this.glowWhite, 0.4);
+          this.pulseT = Math.max(2.2, 4.8 - st.pulse / 40);
+          this.boom(me.x, me.y, me.z - 4, 26, this.glowWhite, 0.4);
           sfx('aura', 0.2);
         } else {
           this.pulseT = 0.3;
@@ -502,35 +637,78 @@ export class SkyStage implements Stage {
     }
   }
 
-  private hitFoe(f: Foe, dmg: number): void {
+  private hitFoe(f: Foe, dmg: number, by: Fighter | null): void {
     if (f.dead) return;
     f.hp -= dmg;
     f.flash = 0.08;
-    sfx('hit', 0.06);
+    if (by?.me) sfx('hit', 0.06);
     if (f.hp <= 0) {
       f.dead = true;
-      this.run.kills += 1;
-      this.boost = Math.min(1, this.boost + 0.05);
-      this.boom(f.x, f.y, f.z, f.boss ? 40 : f.r * 5, this.glowWarm, f.boss ? 0.9 : 0.4);
-      if (f.boss) {
-        sample('blast', 0.7);
-        sfx('boom');
-        this.shake = 1.2;
-        for (let i = 0; i < 8; i++) this.boom(f.x + (Math.random() - 0.5) * 14, f.y + (Math.random() - 0.5) * 10, f.z, 16, this.glowWarm, 0.5 + Math.random() * 0.5);
-        for (const b of this.eshots) b.live = false;
-        if (this.hold === f) this.hold = null;
-        this.hp = Math.min(this.maxHp, this.hp + this.maxHp * 0.4);
-        if (f.type === 'mid') {
-          this.midDone = true;
-          this.host.hud.banner('突破！', '大気圏を抜ける', 'good');
-          this.host.hud.objective('敵を撃ち落として、宇宙の果てへ');
-        } else {
-          this.finished = true;
-          sample('clear', 0.7);
-        }
-      } else {
+      this.boom(f.x, f.y, f.z, f.r * 5, this.glowWarm, 0.4);
+      if (by?.me) {
+        this.run.kills += 1;
+        this.boost = Math.min(1, this.boost + 0.08);
         sfx('kill', 0.07);
       }
+    }
+  }
+
+  /** Damage to a fighter. `by` is whoever fired it (null for the storm, wreckage and creatures). */
+  private hurtFighter(f: Fighter, dmg: number, by: Fighter | null): void {
+    if (!f.alive || f.inv > 0 || f.rollT > 0 || this.finished) return;
+    if (f.me) dmg *= this.st.guard;
+    f.hp -= dmg;
+    if (by) f.lastBy = by;
+    if (f.me) {
+      f.inv = 0.45;
+      this.shake = 0.6;
+      sfx('hurt');
+      this.host.hud.hurt();
+    } else {
+      f.inv = 0.05;
+      if (by?.me) sfx('hit', 0.07);
+    }
+    if (f.hp <= 0) this.down(f);
+  }
+
+  private down(f: Fighter): void {
+    if (!f.alive) return;
+    const hud = this.host.hud;
+    const left = this.alive().length - 1;
+    f.alive = false;
+    f.hp = 0;
+    this.scene.remove(f.g);
+    this.boom(f.x, f.y, f.z, 34, this.glowWarm, 0.8);
+    for (let i = 0; i < 5; i++) this.boom(f.x + (Math.random() - 0.5) * 8, f.y + (Math.random() - 0.5) * 6, f.z, 14, this.glowWarm, 0.4 + Math.random() * 0.5);
+    sample('blast', f.me ? 0.7 : 0.4);
+    sfx('boom');
+    const by = f.lastBy && f.lastBy.alive ? f.lastBy : null;
+    if (by) {
+      by.kills += 1;
+      by.hp = Math.min(by.maxHp, by.hp + by.maxHp * (by.me ? 0.15 : 0.12));
+    }
+    if (f.me) {
+      this.shake = 1.4;
+      this.finished = true;
+      this.result = { place: left + 1, field: FIELD, quota: 1, qualified: false, progress: (FIELD - 1 - left) / (FIELD - 1), gates: this.me.kills };
+      return;
+    }
+    if (by?.me) {
+      this.run.kills += 1;
+      this.boost = 1;
+      this.shake = 0.8;
+      hud.banner('撃墜！', `${f.name} ／ 残り ${left}機`, 'good');
+      hud.say(`${this.me.name}が${f.name}を撃墜！ 残り${left}機！`, 3);
+    } else if (by) hud.say(`${by.name}が${f.name}を撃墜！ 残り${left}機！`, left <= 3 ? 3 : 2);
+    else hud.say(`${f.name}、空域の外で力つきた！ 残り${left}機！`, left <= 3 ? 3 : 2, 'ain');
+    if (left === 3) hud.say('残り3機！ ここからが本当の勝負です！', 3, 'ain');
+    if (left === 2) hud.say(`ついに一騎打ち！ ${this.me.name} 対 ${this.alive().find((o) => !o.me)?.name ?? ''}！`, 3);
+    this.status();
+    if (left === 1 && this.me.alive) {
+      this.finished = true;
+      this.result = { place: 1, field: FIELD, quota: 1, qualified: true, progress: 1, gates: this.me.kills };
+      earn('sky');
+      sample('clear', 0.7);
     }
   }
 
@@ -542,37 +720,136 @@ export class SkyStage implements Stage {
   }
 
   private efire(f: Foe, vx: number, vy: number, vz: number, dmg: number): void {
-    if (this.eshots.length > 260) return;
+    if (this.eshots.length > 200) return;
     const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowPink, depthWrite: false, transparent: true, fog: false }));
     s.scale.set(2.3, 2.3, 1);
     this.scene.add(s);
     this.eshots.push({ s, x: f.x, y: f.y, z: f.z + 1, vx, vy, vz, dmg, live: true });
   }
-  /** A shot aimed at where the fighter is now. */
+  /** A creature's shot, aimed at where its mark is now. */
   private aimed(f: Foe, speed: number, dmg: number, offX = 0, offY = 0): void {
-    const dz = 0 - f.z;
-    const t = dz / speed;
-    this.efire(f, (this.px + offX - f.x) / t, (this.py + offY - f.y) / t, speed, dmg);
+    const v = f.vic;
+    const t = Math.max(0.2, (v.z - f.z) / speed);
+    this.efire(f, (v.x + offX - f.x) / t, (v.y + offY - f.y) / t, speed, dmg);
   }
 
-  private hurt(dmg: number): void {
-    if (this.inv > 0 || this.rollT > 0 || this.finished) return;
-    this.hp -= dmg * this.st.guard;
-    this.inv = 1;
-    this.shake = 0.7;
-    sfx('hurt');
-    this.host.hud.hurt();
-    if (this.hp <= 0) {
-      this.time += DOWN_PENALTY;
-      this.run.downs += 1;
-      this.hp = this.maxHp;
-      this.inv = 2.6;
-      for (const b of this.eshots) b.live = false;
-      this.boom(this.px, this.py, 0, 30, this.glowWhite, 0.6);
-      sfx('down');
-      this.host.hud.penalty(DOWN_PENALTY);
-      this.host.hud.banner('ダウン！', '', 'warn');
+  // ------------------------------------------------------------------ the rivals
+  /**
+   * Where a fighter wants to be: lined up behind the nearest fighter ahead; and if somebody is lined up
+   * behind it, weaving and dropping back to turn the tables. Used by the rivals and by the debug bot.
+   */
+  private decide(f: Fighter): { x: number; y: number; z: number } {
+    const rx = BX * this.ring * 0.85;
+    const ry = BY * this.ring * 0.85;
+    let tx: number;
+    let ty: number;
+    let tz: number;
+    const t = f.tgt;
+    if (t && t.alive) {
+      const slop = (1 - f.skill) * 1.2;
+      tx = t.x + Math.sin(this.time * 1.7 + f.wob) * slop;
+      ty = t.y + Math.cos(this.time * 1.3 + f.wob) * slop * 0.6;
+      tz = t.z + 11 + (1 - f.skill) * 7;
+    } else {
+      // nobody to go after: wander, and let the pack carry the fighter
+      tx = Math.sin(this.time * 0.5 + f.wob) * rx * 0.7;
+      ty = Math.cos(this.time * 0.4 + f.wob * 2) * ry * 0.7;
+      tz = f.z;
     }
+    // out of energy: the bold go out in front, where it comes back fastest
+    if (!f.me && !f.hunting && !f.tail && f.skill > 0.5 && f.en > 0.12 && f.en < 0.5) tz = -9;
+    if (f.tail) {
+      // somebody is lined up behind: weave, and (for those who think of it) drop back behind them in turn
+      tx += Math.sin(this.time * 3.2 + f.wob) * 5.5;
+      ty += Math.cos(this.time * 2.6 + f.wob) * 2.6;
+      if (f.skill > 0.35 || f.me) tz = Math.max(tz, f.tail.z + 9);
+    }
+    // wreckage in the way
+    for (const b of this.blocks) {
+      if (!b.solid || b.z > f.z + 2 || b.z < f.z - 55) continue;
+      const dx = f.x - b.x;
+      const dy = f.y - b.y;
+      const d = Math.hypot(dx, dy);
+      if (d < b.r + 2.8) {
+        tx += (dx / (d || 1)) * 5;
+        ty += (dy / (d || 1)) * 4;
+      }
+    }
+    return { x: clamp(tx, -rx, rx), y: clamp(ty, -ry, ry), z: clamp(tz, -this.depth + 2, this.depth - 2) };
+  }
+
+  /** Picks who a fighter goes after, and notices who is after it. */
+  private scan(f: Fighter): void {
+    let best: Fighter | null = null;
+    let bs = 1e9;
+    let tail: Fighter | null = null;
+    for (const o of this.fighters) {
+      if (o === f || !o.alive) continue;
+      const lat = Math.hypot(o.x - f.x, o.y - f.y);
+      // whoever is easiest to get behind; the wounded draw fire, so does whoever just hit you, and so does an ace
+      // …but nobody piles onto a fighter two others are already after
+      let crowd = 0;
+      for (const x of this.fighters) if (x.alive && x !== f && x.tgt === o) crowd++;
+      const sc = lat + Math.max(0, crowd - 1) * 4 + Math.abs(o.z + 10 - f.z) * 0.25 - (o.hp < o.maxHp * 0.35 ? 4 : 0) - (f.lastBy === o ? 2 : 0) - o.kills * 1.2 + (f.tgt === o ? -1.5 : 0);
+      if (sc < bs) {
+        bs = sc;
+        best = o;
+      }
+      if (o.z > f.z + 2 && lat < 3.4 && (o.me || o.tgt === f)) tail = o;
+    }
+    f.tgt = best;
+    f.tail = tail;
+  }
+
+  private rivalAI(r: Fighter, dt: number): void {
+    r.think -= dt;
+    if (r.think <= 0) {
+      r.think = 0.3 + this.rng() * 0.3;
+      this.scan(r);
+      // a roll out of the line of fire, for those quick enough to think of it
+      if (r.tail && r.rollCd <= 0 && this.rng() < 0.15 + r.skill * 0.4) {
+        r.rollT = 0.45;
+        r.rollCd = 3.5 - r.skill * 1.2;
+        r.rollDir = this.rng() < 0.5 ? -1 : 1;
+      }
+    }
+    // an attack is paid for in energy: go for it on a full tank, coast when it runs dry
+    if (r.hunting && r.en < 0.08) r.hunting = false;
+    else if (!r.hunting && r.en > 0.45 + (1 - r.skill) * 0.25) r.hunting = true;
+    const want = this.decide(r);
+    const k = 1 - Math.pow(0.02, dt);
+    r.vx += (clamp((want.x - r.x) * 2.4, -r.top, r.top) - r.vx) * k;
+    r.vy += (clamp((want.y - r.y) * 2.4, -r.top * 0.8, r.top * 0.8) - r.vy) * k;
+    const push = clamp((want.z - r.z) * 1.5, -22, 20);
+    const spend = (r.hunting || (r.tail && r.en > 0.2) || push < -6) && Math.abs(push) > 3 && r.en > 0.02;
+    if (spend) r.en = Math.max(0, r.en - (push > 0 ? BRAKE_COST : BOOST_COST) * dt);
+    else r.en = Math.min(1, r.en + (0.14 + r.skill * 0.08) * this.charge(r.z) * dt);
+    r.vz += ((spend ? clamp(push, -22, BRAKE_SPEED) : this.coast(r.z)) - r.vz) * k;
+    r.boosting = r.vz < -6;
+    r.x = clamp(r.x + r.vx * dt, -BX, BX);
+    r.y = clamp(r.y + r.vy * dt, -BY, BY);
+    r.z = clamp(r.z + r.vz * dt, -this.depth, this.depth + 6);
+
+    r.fireT -= dt;
+    const t = r.tgt;
+    if (t && t.alive && r.fireT <= 0 && this.time > 3 && t.z < r.z - 2 && r.z - t.z < 70 && Math.hypot(t.x - r.x, t.y - r.y) < 2.6) {
+      r.fireT = 0.52 - 0.16 * r.skill;
+      // the guns warm up as the fight goes on: nobody is shot out of the sky in the first moments
+      const vz = -150;
+      const tt = Math.max(0.05, (t.z - r.z) / vz);
+      const miss = (1 - r.skill) * 14;
+      this.addShot(r, r.x, r.y, r.z - 1.5, (t.x - r.x) / tt + (this.rng() - 0.5) * miss, (t.y - r.y) / tt + (this.rng() - 0.5) * miss, vz, r.dmg * lerp(0.55, 1.25, clamp(this.time / 120, 0, 1)), 3, null);
+      if (Math.abs(r.z - this.me.z) < 40) sfx('shot', 0.05);
+    }
+  }
+
+  /** With no thrust either way, a fighter slides back toward the middle of the pack. */
+  private coast(z: number): number {
+    return clamp(-z * 0.6, -10, 10);
+  }
+  /** How fast energy comes back at a depth: not at all behind the pack, fastest out in front of it. */
+  private charge(z: number): number {
+    return z > 4 ? 0 : z < -6 ? 2.2 : 1;
   }
 
   // ------------------------------------------------------------------ update
@@ -580,85 +857,150 @@ export class SkyStage implements Stage {
     if (this.finished) return;
     this.time += dt;
     const hud = this.host.hud;
-    const prog = clamp(this.dist / COURSE, 0, 1);
+    const me = this.me;
+    const prog = clamp(this.time / SHRINK_TO, 0, 1);
 
-    // steering
+    // the airspace
+    const k = clamp((this.time - SHRINK_FROM) / (SHRINK_TO - SHRINK_FROM), 0, 1);
+    this.ring = lerp(1, RING_MIN, k);
+    this.depth = lerp(DEPTH0, DEPTH1, k);
+    if (this.told === 0 && this.time > SHRINK_FROM) {
+      this.told = 1;
+      sfx('warn');
+      hud.banner('空域が狭まる', '枠の外と、うしろの嵐にいると機体がけずられる', 'warn');
+      hud.say('安全な空域が狭まりはじめました！ 枠の中へ！', 3, 'ain');
+    } else if (this.told === 1 && k > 0.55) {
+      this.told = 2;
+      hud.say('空域はもう半分！ 逃げ場がなくなってきました！', 2);
+    } else if (this.told === 2 && this.time > SUDDEN) {
+      this.told = 3;
+      sfx('warn');
+      hud.banner('サドンデス', '嵐が空域をのみこむ。全機の機体がけずられていく', 'warn');
+      hud.say('時間切れ、サドンデス！ 最後まで飛んでいた1機が勝者です！', 3);
+    }
+
+    // steering: the stick moves across the sky, boost goes ahead of the pack, the brake drops behind it
     const ax = input.move.x;
     const ay = -input.move.y;
-    const top = 17 * (0.9 + 0.1 * this.traits.agi) * (this.rollT > 0 ? 1.7 : 1);
-    const k = 1 - Math.pow(0.0006, dt);
-    this.vx += (ax * top - this.vx) * k;
-    this.vy += (ay * top - this.vy) * k;
-    this.px = clamp(this.px + this.vx * dt, -BX, BX);
-    this.py = clamp(this.py + this.vy * dt, -BY, BY);
-    this.inv = Math.max(0, this.inv - dt);
-
-    // roll: a quick spin that shrugs off shots
-    this.rollCd = Math.max(0, this.rollCd - dt);
-    if (input.bPressed && this.rollCd <= 0 && this.rollT <= 0) {
-      this.rollT = 0.5;
-      this.rollCd = 1;
-      this.rollDir = ax < 0 ? 1 : -1;
+    const top = me.top * (me.rollT > 0 ? 1.7 : 1);
+    const kk = 1 - Math.pow(0.0006, dt);
+    me.vx += (ax * top - me.vx) * kk;
+    me.vy += (ay * top - me.vy) * kk;
+    me.x = clamp(me.x + me.vx * dt, -BX, BX);
+    me.y = clamp(me.y + me.vy * dt, -BY, BY);
+    // the brake opens with a quick roll that shrugs off shots
+    if (input.bPressed && me.rollCd <= 0 && me.rollT <= 0) {
+      me.rollT = 0.5;
+      me.rollCd = 1.6;
+      me.rollDir = ax < 0 ? 1 : -1;
       sfx('roll');
     }
-    if (this.rollT > 0) {
-      this.rollT -= dt;
+    // boost and brake burn the same energy
+    const boosting = input.a && !input.b && this.boost > 0.02;
+    const braking = input.b && this.boost > 0.02;
+    if (boosting && !me.boosting) sfx('boost', 0.3);
+    me.boosting = boosting;
+    if (boosting || braking) this.boost = Math.max(0, this.boost - (braking ? BRAKE_COST : BOOST_COST) * dt);
+    else this.boost = Math.min(1, this.boost + (0.11 + this.st.en) * this.charge(me.z) * dt);
+    const wantZ = boosting ? -26 : braking ? BRAKE_SPEED : this.coast(me.z);
+    me.vz += (wantZ - me.vz) * (1 - Math.pow(0.01, dt));
+    me.z = clamp(me.z + me.vz * dt, -this.depth, this.depth + 6);
+
+    me.think -= dt;
+    if (me.think <= 0) {
+      me.think = 0.25;
+      this.scan(me);
+    }
+    for (const f of this.fighters) {
+      if (!f.alive) continue;
+      f.inv = Math.max(0, f.inv - dt);
+      f.bump = Math.max(0, f.bump - dt);
+      f.rollCd = Math.max(0, f.rollCd - dt);
+      f.rollT = Math.max(0, f.rollT - dt);
+      if (!f.me) this.rivalAI(f, dt);
+    }
+    if (me.rollT > 0) {
       for (const b of this.eshots) {
-        if (b.live && Math.abs(b.z) < 5 && Math.hypot(b.x - this.px, b.y - this.py) < 3.4) {
+        if (b.live && Math.abs(b.z - me.z) < 5 && Math.hypot(b.x - me.x, b.y - me.y) < 3.4) {
           b.live = false;
           this.boom(b.x, b.y, b.z, 4, this.glowWhite, 0.2);
         }
       }
     }
 
-    // boost
-    const want = input.a && this.boost > 0.02 && !this.hold;
-    if (want && !this.boosting) sfx('boost', 0.3);
-    this.boosting = want;
-    if (this.boosting) this.boost = Math.max(0, this.boost - 0.36 * dt);
-    else this.boost = Math.min(1, this.boost + (0.11 + this.st.en) * dt);
-    const target = this.baseSpeed * (this.boosting ? 1.8 : 1);
-    this.speed = lerp(this.speed, target, 1 - Math.pow(0.02, dt));
-    if (!this.hold) this.dist += this.speed * dt;
-
-    // the course
-    while (this.evi < this.events.length && this.events[this.evi].at <= this.dist) this.doEvent(this.events[this.evi++]);
-    if (!this.midDone && !this.hold && prog >= MID_AT) {
-      this.hold = this.spawnFoe('mid', 0, 1, prog);
-      sfx('warn');
-      hud.banner('WARNING', `${this.hold.name} が行く手をふさぐ`, 'warn');
-      hud.objective('行く手をふさぐ敵を倒せ！');
-    }
-    if (!this.bossCalled && this.dist >= COURSE) {
-      this.bossCalled = true;
-      this.dist = COURSE;
-      this.hold = this.spawnFoe('boss', 0, 1, 1);
-      sfx('warn');
-      hud.banner('FINAL', `${this.hold.name}`, 'warn');
-      hud.objective('最後の敵を倒せ！');
+    // outside the airspace, behind the pack, and (at the very end) everywhere: the storm eats the hull
+    this.stormT -= dt;
+    if (this.stormT <= 0) {
+      this.stormT = 0.25;
+      const rx = BX * this.ring + 0.6;
+      const ry = BY * this.ring + 0.6;
+      const all = this.time > SUDDEN ? 0.02 + (this.time - SUDDEN) * 0.0025 : 0;
+      for (const f of this.fighters) {
+        if (!f.alive) continue;
+        const out = Math.abs(f.x) > rx || Math.abs(f.y) > ry || f.z > this.depth + 0.5;
+        const rate = (out ? 0.07 : 0) + all;
+        if (rate <= 0) continue;
+        f.hp -= f.maxHp * rate * 0.25;
+        if (f.me) {
+          hud.hurt();
+          sfx('hurt', 0.12);
+        }
+        if (f.hp <= 0) {
+          if (out) f.lastBy = null;
+          this.down(f);
+          if (this.finished) return;
+        }
+      }
     }
 
-    const aim = this.aimTarget();
-    this.fireGuns(dt, aim);
+    // what flies in
+    this.evT -= dt;
+    if (this.evT <= 0) {
+      this.evT = 4.2 - prog * 1.2 + this.rng() * 1.5;
+      this.event(prog);
+    }
+
+    const aim = this.time > 2 ? this.aimTarget() : null;
+    if (this.time > 2) this.fireGuns(dt, aim);
     this.stepShots(dt);
+    if (this.finished) return;
     this.stepFoes(dt, prog);
+    if (this.finished) return;
     this.stepWorld(dt);
+    if (this.finished) return;
     this.shake = Math.max(0, this.shake - dt * 2.5);
 
-    hud.gauge(clamp(this.hp / this.maxHp, 0, 1), `${Math.max(0, Math.ceil(this.hp))}`);
+    this.chatT -= dt;
+    if (this.chatT <= 0) {
+      this.chatT = 10 + this.rng() * 5;
+      const live = this.alive();
+      const top = live.slice().sort((a, b) => b.kills - a.kills)[0];
+      const lines = [
+        `残り${live.length}機。${me.tail ? `${me.name}、うしろに付かれています！` : `${me.name}はまだ飛んでいます！`}`,
+        'うしろを取られたら、ブレーキで相手のさらにうしろへ！',
+        'エネルギーが切れたら前へ。先頭ほど早く回復します',
+        'リングをくぐると、ブーストと機体が少し回復します',
+      ];
+      if (top && top.kills > 0) lines.push(`ここまでの撃墜王は ${top.name}、${top.kills}機！`);
+      hud.say(lines[Math.floor(this.rng() * lines.length)], 1, this.rng() < 0.5 ? 'ain' : 'chris');
+    }
+
+    this.status();
+    hud.gauge(clamp(me.hp / me.maxHp, 0, 1), `${Math.max(0, Math.ceil(me.hp))}`);
     hud.sub(this.boost);
-    hud.progress(prog, [MID_AT]);
+    hud.progress(k, []);
     hud.level(this.run.level, 0);
-    hud.boss(this.hold && !this.hold.dead ? this.hold.name : null, this.hold ? this.hold.hp / this.hold.max : 0);
     this.place(dt, aim);
+    this.drawRadar();
   }
 
   private stepShots(dt: number): void {
+    const me = this.me;
     for (const s of this.shots) {
       if (!s.live) continue;
       s.life -= dt;
       if (s.target) {
-        if (s.target.dead) s.target = null;
+        if (gone(s.target)) s.target = null;
         else {
           const t = s.target;
           const dx = t.x - s.x;
@@ -675,15 +1017,26 @@ export class SkyStage implements Stage {
       s.x += s.vx * dt;
       s.y += s.vy * dt;
       s.z += s.vz * dt;
-      if (s.life <= 0 || s.z < -300) {
+      if (s.life <= 0 || s.z < me.z - 300) {
         s.live = false;
         continue;
       }
+      for (const f of this.fighters) {
+        if (!f.alive || f === s.by) continue;
+        if (Math.abs(f.z - s.z) < 2.8 && Math.hypot(f.x - s.x, f.y - s.y) < f.r + 0.5) {
+          s.live = false;
+          this.hurtFighter(f, s.by.me ? s.dmg * PLAYER_X : f.me ? s.dmg : s.dmg * RIVAL_X, s.by);
+          this.boom(s.x, s.y, f.z + 1, 2.4, this.glowWhite, 0.12);
+          break;
+        }
+      }
+      if (this.finished) return;
+      if (!s.live) continue;
       for (const f of this.foes) {
         if (f.dead) continue;
         if (Math.abs(f.z - s.z) < 3.4 + f.r * 0.5 && Math.hypot(f.x - s.x, f.y - s.y) < f.r + 0.5) {
           s.live = false;
-          this.hitFoe(f, s.dmg);
+          this.hitFoe(f, s.by.me ? s.dmg : s.dmg * 3, s.by);
           this.boom(s.x, s.y, f.z + 1, 2.4, this.glowWhite, 0.12);
           break;
         }
@@ -709,52 +1062,58 @@ export class SkyStage implements Stage {
   }
 
   private stepFoes(dt: number, prog: number): void {
+    const me = this.me;
     const bitN = this.bitSprites.length;
     this.bitAng += dt * 3.4;
+    const live = this.alive();
     for (const f of this.foes) {
       if (f.dead) continue;
       f.t += dt;
       f.flash = Math.max(0, f.flash - dt);
       f.bitCd = Math.max(0, f.bitCd - dt);
+      if (!f.vic.alive) f.vic = live[Math.floor(this.rng() * live.length)] ?? me;
       if (f.type === 'letter') {
-        // dives straight at the fighter
+        // dives straight at its mark
         f.z += (this.speed + 58) * dt;
         const kk = 1 - Math.pow(0.35, dt);
-        if (f.z < -14) {
-          f.x += (this.px - f.x) * kk;
-          f.y += (this.py - f.y) * kk;
+        if (f.z < f.vic.z - 14) {
+          f.x += (f.vic.x - f.x) * kk;
+          f.y += (f.vic.y - f.y) * kk;
         }
       } else if (f.z < f.holdZ) {
         f.z = Math.min(f.holdZ, f.z + (this.speed + 95) * dt);
+      } else if (f.t > (f.type === 'heart' ? 10 : 8)) {
+        f.z += (this.speed + 30) * dt;
+        f.y += 9 * dt;
       } else {
-        const life = f.boss ? 1e9 : f.type === 'heart' ? 10 : 8;
-        if (f.t > life) {
-          f.z += (this.speed + 30) * dt;
-          f.y += 9 * dt;
-        } else if (f.boss) {
-          this.bossMove(f, dt);
-        } else {
-          f.x = clamp(f.bx + Math.sin(f.t * 1.4 + f.by) * 3.2, -BX - 2, BX + 2);
-          f.y = clamp(f.by + Math.cos(f.t * 1.1 + f.bx) * 1.6, -BY - 1, BY + 1);
-          f.fireT -= dt;
-          if (f.fireT <= 0) {
-            if (f.type === 'heart') {
-              f.fireT = 3 - prog * 0.8;
-              for (const o of [-3.2, 0, 3.2]) this.aimed(f, 44, 11, o, 0);
-            } else {
-              f.fireT = 2.6 - prog * 0.9;
-              this.aimed(f, 48 + prog * 8, 10);
-            }
+        f.x = clamp(f.bx + Math.sin(f.t * 1.4 + f.by) * 3.2, -BX - 2, BX + 2);
+        f.y = clamp(f.by + Math.cos(f.t * 1.1 + f.bx) * 1.6, -BY - 1, BY + 1);
+        f.fireT -= dt;
+        if (f.fireT <= 0) {
+          if (f.type === 'heart') {
+            f.fireT = 3.2 - prog * 0.8;
+            for (const o of [-3.2, 0, 3.2]) this.aimed(f, 44, 9, o, 0);
+          } else {
+            f.fireT = 2.8 - prog * 0.9;
+            this.aimed(f, 48 + prog * 8, 8);
           }
         }
       }
-      // shield bits and ramming
-      if (bitN && f.bitCd <= 0 && Math.abs(f.z) < 4 + f.r && Math.hypot(f.x - this.px, f.y - this.py) < 3.6 + f.r) {
+      // shield bits, and running into things
+      if (bitN && f.bitCd <= 0 && Math.abs(f.z - me.z) < 4 + f.r && Math.hypot(f.x - me.x, f.y - me.y) < 3.6 + f.r) {
         f.bitCd = 0.3;
-        this.hitFoe(f, (22 + this.st.bits * 0.6) * levelMul(this.run.level));
+        this.hitFoe(f, (22 + this.st.bits * 0.6) * levelMul(this.run.level), me);
       }
-      if (!f.dead && Math.abs(f.z) < 2.2 && Math.hypot(f.x - this.px, f.y - this.py) < f.r * 0.8 + 0.9) this.hurt(14);
-      if (f.z > 14) f.dead = true;
+      if (!f.dead) {
+        for (const ft of live) {
+          if (ft.alive && ft.bump <= 0 && Math.abs(f.z - ft.z) < 2.2 && Math.hypot(f.x - ft.x, f.y - ft.y) < f.r * 0.8 + 0.9) {
+            ft.bump = 0.6;
+            this.hurtFighter(ft, ft.me ? 14 : ft.maxHp * 0.05, null);
+          }
+        }
+      }
+      if (this.finished) return;
+      if (f.z > DEPTH0 + 24) f.dead = true;
       f.s.position.set(f.x, f.y, f.z);
       const c = f.flash > 0 ? 3.5 : 1;
       (f.s.material as THREE.SpriteMaterial).color.setRGB(c, c, c);
@@ -767,17 +1126,24 @@ export class SkyStage implements Stage {
       b.x += b.vx * dt;
       b.y += b.vy * dt;
       b.z += b.vz * dt;
-      if (b.z > 12) b.live = false;
-      else if (Math.abs(b.z) < 1.6 && Math.hypot(b.x - this.px, b.y - this.py) < 1.25) {
-        b.live = false;
-        this.hurt(b.dmg);
-      } else if (bitN && Math.abs(b.z) < 4) {
-        for (let i = 0; i < bitN; i++) {
-          const a = this.bitAng + (i / bitN) * TAU;
-          if (Math.hypot(b.x - (this.px + Math.cos(a) * 3), b.y - (this.py + Math.sin(a) * 2.2)) < 1.5) {
+      if (b.z > DEPTH0 + 20) b.live = false;
+      else {
+        for (const ft of live) {
+          if (ft.alive && Math.abs(b.z - ft.z) < 1.6 && Math.hypot(b.x - ft.x, b.y - ft.y) < 1.25) {
             b.live = false;
-            this.boom(b.x, b.y, b.z, 3, this.glowWhite, 0.15);
+            this.hurtFighter(ft, ft.me ? b.dmg : ft.maxHp * 0.03, null);
             break;
+          }
+        }
+        if (this.finished) return;
+        if (b.live && bitN && Math.abs(b.z - me.z) < 4) {
+          for (let i = 0; i < bitN; i++) {
+            const a = this.bitAng + (i / bitN) * TAU;
+            if (Math.hypot(b.x - (me.x + Math.cos(a) * 3), b.y - (me.y + Math.sin(a) * 2.2)) < 1.5) {
+              b.live = false;
+              this.boom(b.x, b.y, b.z, 3, this.glowWhite, 0.15);
+              break;
+            }
           }
         }
       }
@@ -785,88 +1151,73 @@ export class SkyStage implements Stage {
     }
     for (const b of this.eshots) if (!b.live) this.scene.remove(b.s), b.s.material.dispose();
     this.eshots = this.eshots.filter((b) => b.live);
-  }
 
-  private bossMove(f: Foe, dt: number): void {
-    const final = f.type === 'boss';
-    const rage = f.hp < f.max * 0.5 ? 1 : 0;
-    f.x = Math.sin(f.t * (0.5 + rage * 0.2)) * (final ? 7 : 6);
-    f.y = 1 + Math.sin(f.t * 0.9) * 2.6;
-    f.fireT -= dt;
-    const cyc = (f.t % (final ? 12 : 9));
-    if (cyc < 4) {
-      // fans of aimed shots
-      if (f.fireT <= 0) {
-        f.fireT = 1.15 - rage * 0.3;
-        const n = final ? 5 : 3;
-        for (let i = 0; i < n; i++) this.aimed(f, 52, 11, (i - (n - 1) / 2) * 3.4, 0);
-        sfx('shot', 0.2);
-      }
-    } else if (cyc < 8) {
-      // rings that open up as they come, with a gap to slip through
-      if (f.fireT <= 0) {
-        f.fireT = 1.5 - rage * 0.4;
-        const n = final ? 16 : 12;
-        const gap = Math.floor(this.rng() * n);
-        for (let i = 0; i < n; i++) {
-          if (i === gap || i === (gap + 1) % n) continue;
-          const a = (i / n) * TAU;
-          this.efire(f, Math.cos(a) * 9 + (this.px - f.x) * 0.5, Math.sin(a) * 9 + (this.py - f.y) * 0.5, 44, 10);
+    // the shield bits also swat rival shots coming up from behind, and scrape rivals who fly too close
+    if (bitN) {
+      for (const s of this.shots) {
+        if (!s.live || s.by.me || Math.abs(s.z - me.z) > 4) continue;
+        for (let i = 0; i < bitN; i++) {
+          const a = this.bitAng + (i / bitN) * TAU;
+          if (Math.hypot(s.x - (me.x + Math.cos(a) * 3), s.y - (me.y + Math.sin(a) * 2.2)) < 1.6) {
+            s.live = false;
+            this.boom(s.x, s.y, s.z, 3, this.glowWhite, 0.15);
+            break;
+          }
         }
-        sfx('magic', 0.2);
       }
-    } else if (final) {
-      // a spiral, and reinforcements
-      if (f.fireT <= 0) {
-        f.fireT = 0.11;
-        f.phase += 0.5;
-        this.efire(f, Math.cos(f.phase) * 11 + (this.px - f.x) * 0.45, Math.sin(f.phase) * 11 + (this.py - f.y) * 0.45, 46, 10);
+      for (const r of live) {
+        if (r.me || !r.alive || r.bump > 0) continue;
+        if (Math.abs(r.z - me.z) < 5 && Math.hypot(r.x - me.x, r.y - me.y) < 4.6) {
+          r.bump = 0.4;
+          this.hurtFighter(r, (18 + this.st.bits * 0.5) * levelMul(this.run.level) * PLAYER_X, me);
+        }
       }
-      if (cyc > 11.9 - dt * 1.01 && this.foes.length < 8) {
-        for (let i = 0; i < 3; i++) this.spawnFoe('bagel', (i - 1) * 7, -3, 0.9);
-      }
-    } else if (f.fireT <= 0) {
-      f.fireT = 0.5;
-      this.aimed(f, 58, 12);
     }
   }
 
   private stepWorld(dt: number): void {
+    const me = this.me;
     const v = this.speed * dt;
+    const live = this.alive();
     for (const b of this.blocks) {
       b.z += v;
       b.m.rotation.y += b.spin * dt;
       b.m.position.set(b.x, b.y, b.z);
-      if (b.solid && Math.abs(b.z) < b.r * 0.8 + 1 && Math.hypot(b.x - this.px, b.y - this.py) < b.r + 0.8) {
-        if (this.inv <= 0 && this.rollT <= 0) {
-          this.hurt(16);
-          this.speed *= 0.55;
+      if (!b.solid) continue;
+      for (const f of live) {
+        if (f.alive && f.bump <= 0 && f.rollT <= 0 && Math.abs(b.z - f.z) < b.r * 0.8 + 1 && Math.hypot(b.x - f.x, b.y - f.y) < b.r + 0.8) {
+          f.bump = 0.7;
+          this.hurtFighter(f, f.me ? 16 : f.maxHp * 0.06, null);
+          f.vz += 10;
         }
       }
+      if (this.finished) return;
     }
     for (const b of this.blocks) {
-      if (b.z > 30) {
+      if (b.z > DEPTH0 + 40) {
         this.scene.remove(b.m);
         (b.m.material as THREE.Material).dispose();
       }
     }
-    this.blocks = this.blocks.filter((b) => b.z <= 30);
+    this.blocks = this.blocks.filter((b) => b.z <= DEPTH0 + 40);
 
     for (const r of this.rings) {
       r.z += v;
       r.m.position.set(r.x, r.y, r.z);
       r.m.rotation.z += dt * 2;
-      if (!r.taken && Math.abs(r.z) < 2.5 && Math.hypot(r.x - this.px, r.y - this.py) < 3.2) {
+      for (const f of live) {
+        if (r.taken || !f.alive || Math.abs(r.z - f.z) > 2.5 || Math.hypot(r.x - f.x, r.y - f.y) > 3.2) continue;
         r.taken = true;
-        this.boost = Math.min(1, this.boost + 0.45);
-        this.speed += 14;
-        this.hp = Math.min(this.maxHp, this.hp + 4);
-        sfx('ring');
-        this.boom(r.x, r.y, 0, 12, this.glowWarm, 0.3);
+        f.hp = Math.min(f.maxHp, f.hp + f.maxHp * 0.06);
+        if (f.me) {
+          this.boost = Math.min(1, this.boost + 0.45);
+          sfx('ring');
+        }
+        this.boom(r.x, r.y, r.z, 12, this.glowWarm, 0.3);
       }
     }
-    for (const r of this.rings) if (r.taken || r.z > 20) this.scene.remove(r.m);
-    this.rings = this.rings.filter((r) => !r.taken && r.z <= 20);
+    for (const r of this.rings) if (r.taken || r.z > DEPTH0 + 30) this.scene.remove(r.m);
+    this.rings = this.rings.filter((r) => !r.taken && r.z <= DEPTH0 + 30);
 
     for (const f of this.fx) {
       f.t += dt;
@@ -879,7 +1230,7 @@ export class SkyStage implements Stage {
     for (const f of this.fx) if (f.t >= f.max) this.scene.remove(f.s), f.s.material.dispose();
     this.fx = this.fx.filter((f) => f.t < f.max);
 
-    // stars, speed lines, clouds
+    // stars, speed lines, clouds, and the frames that mark the airspace
     const pos = this.stars.geometry.getAttribute('position') as THREE.BufferAttribute;
     for (let i = 0; i < pos.count; i++) {
       let z = pos.getZ(i) + v * 0.5;
@@ -887,23 +1238,30 @@ export class SkyStage implements Stage {
       pos.setZ(i, z);
     }
     pos.needsUpdate = true;
+    const rush = me.boosting ? 4 : 2.6;
     for (const m of this.lines) {
-      m.position.z += v * 2.6;
-      if (m.position.z > 20) {
+      m.position.z += v * rush;
+      if (m.position.z > me.z + 20) {
         m.position.z -= 280;
-        m.position.x = this.px + (Math.random() - 0.5) * 70;
-        m.position.y = this.py + (Math.random() - 0.5) * 40;
+        m.position.x = me.x + (Math.random() - 0.5) * 70;
+        m.position.y = me.y + (Math.random() - 0.5) * 40;
       }
     }
     for (const c of this.clouds) {
       c.position.z += v * 1.1;
-      if (c.position.z > 30) c.position.z -= 500;
+      if (c.position.z > 50) c.position.z -= 500;
+    }
+    for (const f of this.frames) {
+      f.position.z += v * 1.6;
+      if (f.position.z > me.z + 8) f.position.z -= 9 * 36;
+      f.scale.set(BX * this.ring + 1.6, BY * this.ring + 1.4, 1);
     }
   }
 
-  /** Puts the fighter, the camera and the mood of the sky in place. */
-  private place(dt: number, aim: Foe | null = null): void {
-    const prog = clamp(this.dist / COURSE, 0, 1);
+  /** Puts the fighters, the camera and the mood of the sky in place. */
+  private place(dt: number, aim: Tgt | null = null): void {
+    const me = this.me;
+    const prog = clamp(this.time / SHRINK_TO, 0, 1);
     // blue sky -> dusk -> space
     const a = clamp(prog / 0.4, 0, 1);
     const b = clamp((prog - 0.4) / 0.25, 0, 1);
@@ -916,23 +1274,29 @@ export class SkyStage implements Stage {
       c.material.opacity = cloudA;
       c.visible = cloudA > 0.01;
     }
-    (this.lines[0].material as THREE.MeshBasicMaterial).opacity = this.boosting ? 0.6 : 0.16;
+    (this.lines[0].material as THREE.MeshBasicMaterial).opacity = me.boosting ? 0.6 : 0.16;
+    this.frameMat.opacity = 0.35 + (this.ring < 1 ? 0.3 : 0) + Math.sin(this.time * 5) * 0.08;
 
-    const roll = this.rollT > 0 ? (1 - this.rollT / 0.5) * TAU * this.rollDir : 0;
-    this.ship.position.set(this.px, this.py, 0);
-    this.ship.rotation.set(this.vy * 0.018, -this.vx * 0.012, -this.vx * 0.035 + roll);
-    this.ship.visible = !(this.inv > 0 && Math.floor(this.time * 18) % 2 === 0);
-    const fl = (this.boosting ? 2.3 : 1.1) + Math.sin(this.time * 40) * 0.15;
-    this.flame.scale.set(fl, fl, 1);
+    for (const f of this.fighters) {
+      if (!f.alive) continue;
+      const roll = f.rollT > 0 ? (1 - f.rollT / 0.5) * TAU * f.rollDir : 0;
+      f.g.position.set(f.x, f.y, f.z);
+      f.g.rotation.set(f.vy * 0.018, -f.vx * 0.012, -f.vx * 0.035 + roll);
+      const fl = (f.boosting ? 2.3 : 1.1) + Math.sin(this.time * 40 + f.wob) * 0.15;
+      f.flame.scale.set(fl, fl, 1);
+      if (f.me) f.g.visible = !(f.inv > 0 && Math.floor(this.time * 18) % 2 === 0);
+      else this.drawTag(f);
+    }
 
     const n = this.bitSprites.length;
     for (let i = 0; i < n; i++) {
       const an = this.bitAng + (i / n) * TAU;
-      this.bitSprites[i].position.set(this.px + Math.cos(an) * 3, this.py + Math.sin(an) * 2.2, Math.sin(an) * 0.8);
+      this.bitSprites[i].position.set(me.x + Math.cos(an) * 3, me.y + Math.sin(an) * 2.2, me.z + Math.sin(an) * 0.8);
+      this.bitSprites[i].visible = me.alive;
     }
 
-    this.reticle.position.set(this.px, this.py, -46);
-    if (aim) {
+    this.reticle.position.set(me.x, me.y, me.z - 46);
+    if (aim && !gone(aim)) {
       this.lock.visible = true;
       this.lock.position.set(aim.x, aim.y, aim.z + 1);
       const sc = aim.r * 2.6 + Math.sin(this.time * 12) * 0.4;
@@ -941,10 +1305,45 @@ export class SkyStage implements Stage {
     } else {
       this.lock.visible = false;
     }
+    this.warn.classList.toggle('on', !!me.tail && me.alive);
 
     const sh = this.shake;
-    this.camera.position.set(this.px * 0.62 + (Math.random() - 0.5) * sh, this.py * 0.6 + 2.2 + (Math.random() - 0.5) * sh, 13.5 + (this.boosting ? 1.6 : 0));
-    this.camera.lookAt(this.px * 0.78, this.py * 0.74 + 0.4, -40);
+    this.camera.position.set(me.x * 0.62 + (Math.random() - 0.5) * sh, me.y * 0.6 + 2.2 + (Math.random() - 0.5) * sh, me.z + 13.5 + (me.boosting ? 1.6 : 0));
+    this.camera.lookAt(me.x * 0.78, me.y * 0.74 + 0.4, me.z - 40);
+  }
+
+  /** From above: ahead is up. Rivals behind the player cannot be seen any other way. */
+  private drawRadar(): void {
+    const g = this.radar.getContext('2d')!;
+    const W = 96;
+    const Hh = 132;
+    const me = this.me;
+    g.clearRect(0, 0, W, Hh);
+    g.fillStyle = 'rgba(6,10,24,0.72)';
+    g.fillRect(0, 0, W, Hh);
+    const sx = (x: number) => W / 2 + (x / (BX + 1)) * (W / 2 - 4);
+    const sy = (z: number) => Hh / 2 + (z / (DEPTH0 + 8)) * (Hh / 2 - 4);
+    // the storm behind, and the edge of the airspace
+    g.fillStyle = 'rgba(255,92,200,0.28)';
+    g.fillRect(0, sy(this.depth), W, Hh);
+    g.fillRect(0, 0, sx(-BX * this.ring), Hh);
+    g.fillRect(sx(BX * this.ring), 0, W, Hh);
+    g.strokeStyle = 'rgba(255,255,255,0.25)';
+    g.strokeRect(0.5, 0.5, W - 1, Hh - 1);
+    for (const f of this.fighters) {
+      if (!f.alive || f.me) continue;
+      const hot = f.tgt === me && f.z > me.z;
+      g.fillStyle = hot ? (Math.floor(this.time * 8) % 2 ? '#ffffff' : '#ff5c7a') : f.z > me.z ? '#ff9a5c' : '#ffd23f';
+      g.beginPath();
+      g.arc(sx(f.x), sy(f.z), hot ? 4 : 3, 0, TAU);
+      g.fill();
+    }
+    g.fillStyle = '#7dffb0';
+    g.beginPath();
+    g.moveTo(sx(me.x), sy(me.z) - 6);
+    g.lineTo(sx(me.x) + 4.5, sy(me.z) + 4);
+    g.lineTo(sx(me.x) - 4.5, sy(me.z) + 4);
+    g.fill();
   }
 
   render(): void {
@@ -953,39 +1352,26 @@ export class SkyStage implements Stage {
 
   // ------------------------------------------------------------------ debug bot
   botStep(): { x: number; y: number; a: boolean; b: boolean } {
-    let tx = 0;
-    let ty = 0;
-    const aim = this.foes.filter((f) => !f.dead && f.z < -8).sort((a, b) => b.z - a.z)[0];
-    if (aim) {
-      tx = aim.x;
-      ty = aim.y;
-    }
-    let roll = false;
-    let ax = clamp((tx - this.px) / 2, -1, 1);
-    let ay = clamp((ty - this.py) / 2, -1, 1);
-    for (const b of this.blocks) {
-      if (!b.solid || b.z > 2 || b.z < -55) continue;
-      const dx = this.px - b.x;
-      const dy = this.py - b.y;
-      const d = Math.hypot(dx, dy);
-      if (d < b.r + 2.6) {
-        ax += (dx / (d || 1)) * 2.4;
-        ay += (dy / (d || 1)) * 2.4;
-      }
-    }
+    const me = this.me;
+    const want = this.decide(me);
+    let ax = clamp((want.x - me.x) / 2, -1, 1);
+    let ay = clamp((want.y - me.y) / 2, -1, 1);
     for (const b of this.eshots) {
-      if (b.z < -26 || b.z > 1) continue;
-      const t = -b.z / b.vz;
-      const dx = this.px - (b.x + b.vx * t);
-      const dy = this.py - (b.y + b.vy * t);
+      if (b.z < me.z - 26 || b.z > me.z + 1) continue;
+      const t = (me.z - b.z) / b.vz;
+      const dx = me.x - (b.x + b.vx * t);
+      const dy = me.y - (b.y + b.vy * t);
       const d = Math.hypot(dx, dy);
       if (d < 2.4) {
         ax += (dx / (d || 1)) * 2 + (d < 0.2 ? 1 : 0);
         ay += (dy / (d || 1)) * 2;
-        if (b.z > -5 && d < 1.4) roll = true;
       }
     }
     const l = Math.max(1, Math.hypot(ax, ay));
-    return { x: ax / l, y: -ay / l, a: this.boost > 0.3 && !this.hold, b: roll };
+    // like the rivals: an attack on a full tank, then coast
+    if (this.botHunt && this.boost < 0.08) this.botHunt = false;
+    else if (!this.botHunt && this.boost > 0.6) this.botHunt = true;
+    const go = this.botHunt || !!me.tail;
+    return { x: ax / l, y: -ay / l, a: go && want.z < me.z - 4, b: go && want.z > me.z + 4 };
   }
 }

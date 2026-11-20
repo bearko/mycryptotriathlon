@@ -174,7 +174,7 @@ export const FEATS: Feat[] = [
   { id: 'passive', name: '英霊の声', desc: 'パッシブスキルを発動させる' },
   { id: 'sea', name: '深海へ', desc: '海で秘宝を手に入れる（10 位以内）' },
   { id: 'sea1', name: '海の覇者', desc: '海で最初に秘宝を手に入れる' },
-  { id: 'sky', name: '宇宙へ', desc: '空をクリアする' },
+  { id: 'sky', name: '宇宙へ', desc: '空で最後の1機になる' },
 ];
 
 const KEY = 'mct.meta.v1';

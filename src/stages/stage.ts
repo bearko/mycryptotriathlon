@@ -16,7 +16,8 @@ export interface Hud {
   /** One line from the commentary booth. Higher priority lines push ahead of chatter. */
   say(text: string, prio?: number, who?: 'chris' | 'ain'): void;
   /** Place in the race, and how many of the qualifying spots are taken. */
-  rank(place: number, total: number, passed: number, quota: number): void;
+  /** `note` replaces the "passed / quota" line (the sky has no quota: it shows who is left). */
+  rank(place: number, total: number, passed: number, quota: number, note?: string): void;
   fouls(n: number, limit: number): void;
   gum(n: number): void;
   /** Every runner's progress along the course (0..1); `me` is the player's. */
