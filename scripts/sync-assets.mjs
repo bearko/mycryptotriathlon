@@ -41,6 +41,48 @@ const RARITIES = ['Common', 'Uncommon', 'Rare', 'Epic', 'Legendary'];
 
 // ---------------------------------------------------------------- heroes
 // Originals only (replicas and collaboration entries are left out).
+/**
+ * Reads a hero's passive skill into something the races can act on.
+ * The wording of the original is kept (shown in the cut-in); only the trigger and the kind of effect are mapped.
+ */
+function parsePassive(p) {
+  const d = p?.description?.ja;
+  if (!p || !d) return null;
+  const c = d.condition ?? '';
+  const num = (re) => Number((c.match(re) ?? [])[1] ?? 0);
+  let trig = 'tick';
+  let pct = 0;
+  if (/死亡した後/.test(c)) trig = 'death';
+  else if (/バトル開始時/.test(c)) trig = 'start';
+  else if (/HP(合計)?が\d+%(未満|以下)/.test(c)) { trig = 'hp'; pct = num(/HP(?:合計)?が(\d+)%/); }
+  else if (/自身がActive Skillでダメージを受けた後/.test(c)) trig = 'hurt';
+  else if (/自身がActive Skillを使用した後/.test(c)) trig = 'skill';
+  const fx = [];
+  for (const e of d.effects ?? []) {
+    const t = e.description ?? '';
+    const v = ((e.min_rate ?? 0) + (e.max_rate ?? e.min_rate ?? 0)) / 2;
+    const foe = /^([^に を]*)敵/.test(t);
+    let m;
+    if (/復活/.test(t)) fx.push({ t: 'revive', v });
+    else if (/ダメージ/.test(t) && foe) fx.push({ t: 'dmg', v, all: /敵全体/.test(t) });
+    else if (/回復/.test(t)) fx.push({ t: 'heal', v });
+    else if (/睡眠|気絶|混乱|恐怖/.test(t) && foe) fx.push({ t: 'sleep', v: e.success_rate ?? 50 });
+    else if (/バリア/.test(t)) fx.push({ t: 'barrier', v });
+    else if (/デコイ/.test(t)) fx.push({ t: 'decoy', v });
+    else if ((m = t.match(/の(PHY|INT|AGI)[^のを]*を.*(アップ|ダウン)/))) {
+      const up = m[2] === 'アップ';
+      if (foe && !up) fx.push({ t: 'debuff', stat: m[1].toLowerCase(), v });
+      else if (!foe && up) fx.push({ t: 'buff', stat: m[1].toLowerCase(), v });
+    }
+  }
+  if (!fx.length) return null;
+  return {
+    name: p.name.ja, trig, pct, rate: d.trigger_rate ?? 100, once: /回だけ/.test(c),
+    text: (d.text ?? '').replace('{triggerRate}', String(d.trigger_rate ?? 100)).replace(/\{successRate\}/g, '50'),
+    fx,
+  };
+}
+
 const heroes = readJson('Data/Heroes/heroes.json')
   .filter((h) => h.category === 'original' && RARITIES.includes(h.rarity?.name))
   .filter((h) => existsSync(join(src, h.image_file_path)))
@@ -53,7 +95,7 @@ const heroes = readJson('Data/Heroes/heroes.json')
     phy: h.max_level_stats.phy,
     int: h.max_level_stats.int,
     agi: h.max_level_stats.agi,
-    passive: h.passive?.name?.ja ?? '',
+    passive: parsePassive(h.passive),
     img: use(h.image_file_path),
   }));
 
@@ -149,6 +191,13 @@ const catalog = {
   icons: {
     ce: use('Image/Icons/ce.png'),
     gum: use('Image/Icons/gum.png'),
+    resurrection: use('Image/BattleIcons/StatusEffects/resurrection.png'),
+    sleep: use('Image/BattleIcons/StatusEffects/sleep.png'),
+    decoy: use('Image/BattleIcons/StatusEffects/decoy.png'),
+    bufPhy: use('Image/BattleIcons/Buffs/buf_phy.png'),
+    bufInt: use('Image/BattleIcons/Buffs/buf_int.png'),
+    bufAgi: use('Image/BattleIcons/Buffs/buf_agi.png'),
+    dbfAgi: use('Image/BattleIcons/Buffs/dbf_agi.png'),
   },
   chars: {
     chrisIdle: use('Image/Characters/chris_00_idle.png'),
@@ -157,6 +206,12 @@ const catalog = {
     chrisSad: use('Image/Characters/chris_08_sad.png'),
     ainUp: use('Image/Characters/navi_ain_02_both_arms_up.png'),
     ainPoint: use('Image/Characters/navi_ain_00_pointer_up.png'),
+    ainTalk: use('Image/Characters/navi_ain_07_talk.png'),
+    ref: use('Image/Characters/maycri_02_eyes_wide.png'),
+    refAngry: use('Image/Characters/maycri_03_eyes_thin.png'),
+    ainSmile: use('Image/Characters/navi_ain_06_smile.png'),
+    chrisTalk: use('Image/Characters/chris_speak_01_talk.png'),
+    chrisCry: use('Image/Characters/chris_cry_01_cry.png'),
   },
   bgm: {
     title: use('Audio/BGM/land.mp3'),

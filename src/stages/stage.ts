@@ -13,6 +13,15 @@ export interface Hud {
   banner(text: string, sub?: string, tone?: 'warn' | 'good'): void;
   hurt(): void;
   penalty(sec: number): void;
+  /** One line from the commentary booth. Higher priority lines push ahead of chatter. */
+  say(text: string, prio?: number, who?: 'chris' | 'ain'): void;
+  /** Place in the race, and how many of the qualifying spots are taken. */
+  rank(place: number, total: number, passed: number, quota: number): void;
+  fouls(n: number, limit: number): void;
+  /** Every runner's progress along the course (0..1); `me` is the player's. */
+  dots(all: number[], me: number): void;
+  /** The passive-skill cut-in. */
+  cutin(img: string, name: string, text: string): void;
 }
 
 export interface Host {
@@ -28,9 +37,18 @@ export interface Stage {
   /** Stage clock in seconds (includes penalties). */
   time: number;
   finished: boolean;
+  /** Set when the race ends: the place taken, and whether that was enough to go on. */
+  result?: StageResult;
   update(dt: number): void;
   render(): void;
   dispose(): void;
   /** Debug: steer the hero. */
   botStep?(): { x: number; y: number; a: boolean; b: boolean };
+}
+
+export interface StageResult {
+  place: number; field: number; quota: number; qualified: boolean;
+  /** 0..1 along the course when the race ended. */
+  progress: number;
+  gates: number;
 }

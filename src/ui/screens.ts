@@ -6,12 +6,16 @@ import {
 } from '../core/catalog';
 import { input } from '../core/input';
 import { commit, save } from '../core/save';
+import { meta } from '../game/meta';
+import type { Payout } from '../game/reward';
+import type { StageResult } from '../stages/stage';
 import { fmtDelta, fmtTime } from '../core/util';
 import {
   autoFighter, fighterStats, STAGE_EN, STAGE_NAME, STAGES, totalTime, type Run, type StageId,
 } from '../game/run';
 
 let layer: HTMLElement;
+export const screenLayer = () => layer;
 export function initScreens(root: HTMLElement): void {
   layer = document.createElement('div');
   layer.className = 'screens';
@@ -36,9 +40,9 @@ const stars = (n: number) => '★'.repeat(n) + '<i>' + '★'.repeat(5 - n) + '</
 
 const RULES: Record<StageId, { goal: string; pc: string; touch: string }> = {
   land: {
-    goal: 'エクステンションを拾って強くなり、関門を破ってゴールへ',
-    pc: '移動 WASD ／ ダッシュ Space',
-    touch: '左スティックで移動 ／ A でダッシュ',
+    goal: '50組中、30位以内でゴールせよ。関門では番人に規定のダメージを与えると通過できる',
+    pc: '移動 WASD ／ ダッシュ Space（体当たりは反則なし） ／ ストライク Shift（審判の円の中でライバルに当てると反則）',
+    touch: '左スティックで移動 ／ A ダッシュ（体当たり） ／ B ストライク（審判の円の中では反則）',
   },
   sea: {
     goal: '遺物を掘り出して門を開き、深海の主を倒して秘宝を手に入れろ',
@@ -58,15 +62,15 @@ export function titleScreen(): Promise<void> {
   const el = open('title', `
     <div class="title-bg" style="background-image:url(${cat.bg.title})"></div>
     <div class="title-box">
-      <p class="title-sub">陸・海・空 3種目リレー タイムアタック</p>
+      <p class="title-sub">50組が競う 陸・海・空 3種目リレー</p>
       <h1><span>My</span><span>Crypto</span><span class="tri">Triathlon</span></h1>
       <div class="title-legs">
-        <span class="l-land"><b>陸</b>駆け抜ける</span><i>▶</i>
-        <span class="l-sea"><b>海</b>潜る</span><i>▶</i>
-        <span class="l-sky"><b>空</b>飛ぶ</span>
+        <span class="l-land"><b>陸</b>50組→30組</span><i>▶</i>
+        <span class="l-sea"><b>海</b>30組→10組</span><i>▶</i>
+        <span class="l-sky"><b>空</b>最後の1組へ</span>
       </div>
       <button class="btn big" id="t-start">START</button>
-      <p class="title-best">${s.best !== null ? `自己ベスト <b>${fmtTime(s.best)}</b>` : 'はじめての挑戦'}</p>
+      <p class="title-best">${meta().runs ? `挑戦 <b>${meta().runs}</b> 回 ／ ${meta().bestPlace ? `陸の最高 <b>${meta().bestPlace}位</b>` : `陸の最長 <b>${Math.round(meta().bestProgress * 100)}%</b>`}${s.best !== null ? ` ／ 完走ベスト <b>${fmtTime(s.best)}</b>` : ''}` : 'はじめての挑戦'}</p>
       <button class="btn ghost small" id="t-about">このゲームについて</button>
     </div>
     <img class="title-chris" src="${cat.chars.chrisCheer}" alt="">
@@ -90,8 +94,9 @@ function aboutModal(): void {
   const el = open('modal', `
     <div class="panel about">
       <h2>このゲームについて</h2>
-      <p>My Crypto Triathlon は、My Crypto Heroes のヒーローが陸・海・空の3種目をリレーでつなぐ、タイムアタックのスポーツゲームです。3人のヒーローを選び、エクステンションをバトンのように受け渡しながら、合計タイムの短さを競います。</p>
-      <p>ダウンしてもレースは終わりません。そのぶん、タイムに <b>+8秒</b> が加わります。</p>
+      <p>My Crypto Triathlon は、My Crypto Heroes のヒーロー 50 組が陸・海・空の3種目を競うスポーツゲームです。3人のヒーローでリレーを組み、エクステンションをバトンのように受け渡します。陸で上位 30 組、海で上位 10 組に入らないと、次へは進めません。</p>
+      <p>最初は予選を通れなくて当たり前。走るたびに手に入る CE でスキルツリーを育て、少しずつゴールに近づいていきます。</p>
+      <p>HP が 0 になると数秒のあいだ気絶します。コースには審判が立っています。審判の視界（円）の中でライバルを直接攻撃（ストライク）すると反則ポイントがたまり、たまりきるとその場で止められます。円の外なら、おとがめなし。ダッシュの体当たりやアイテムは、どこでも反則になりません。</p>
       <p class="fine">非公式の二次創作（ファン制作）です。ヒーロー・エクステンション・エネミーの画像、BGM、効果音は My Crypto Heroes（MCH Co., Ltd.）のもので、デザインガイドラインに沿って非営利で使っています。クリスくん・マインちゃんのドット絵：こじもこ。</p>
       <p class="fine"><a href="https://bearko.games/" target="_blank" rel="noopener">bearko.games</a></p>
       <button class="btn" id="a-close">とじる</button>
@@ -265,7 +270,7 @@ export async function introCard(stage: StageId, index: number, run: Run, quick: 
 }
 
 /** Split time after a race. Resolves on a tap or after a moment: the next runner is waiting. */
-export async function clearCard(index: number, run: Run): Promise<void> {
+export async function clearCard(index: number, run: Run, res?: StageResult): Promise<void> {
   const stage = STAGES[index];
   const s = save();
   const split = run.splits[index];
@@ -276,7 +281,7 @@ export async function clearCard(index: number, run: Run): Promise<void> {
   sample('win', 0.5);
   const el = open(`clear ${stage}`, `
     <div class="clear-band">
-      <p class="what">${STAGE_NAME[stage]} CLEAR</p>
+      <p class="what">${res ? `${STAGE_NAME[stage]} ${res.place}位で通過！` : `${STAGE_NAME[stage]} CLEAR`}</p>
       <p class="split">${fmtTime(split)}</p>
       <p class="delta ${delta === null ? '' : delta <= 0 ? 'ahead' : 'behind'}">
         ${delta === null ? '' : `自己ベスト比 ${fmtDelta(delta)}`}${isGold && gold !== null ? ' <b class="gold">区間ベスト！</b>' : ''}
@@ -387,7 +392,7 @@ export function hangarScreen(run: Run, quick: boolean): Promise<void> {
 
 // ------------------------------------------------------------------ result
 export type After = 'retry' | 'select';
-export function resultScreen(run: Run): Promise<After> {
+export function resultScreen(run: Run, pay?: Payout): Promise<After> {
   const s = save();
   const total = totalTime(run);
   const prev = s.best;
@@ -421,9 +426,9 @@ export function resultScreen(run: Run): Promise<After> {
       <ul class="splits">${rows}</ul>
       <p class="meta">撃破 ${run.kills} ／ ダウン ${run.downs}（+${(run.downs * 8).toFixed(0)}秒） ／ チーム Lv${run.level}</p>
       <div class="gear">${run.slots.map((sl) => `<span style="--rar:${RARITY_COLOR[sl.ext.rarity]}" title="${sl.ext.name}（${KIND_LABEL[sl.ext.kind]}）"><img src="${sl.ext.img}" alt=""><b>Lv${sl.lv}</b></span>`).join('')}</div>
+      ${pay ? `<p class="earn"><img src="${cat.icons.ce}" alt=""> CE +${pay.total}${pay.feats.length ? ` ／ 🏅 メダル +${pay.feats.length}` : ''}</p>` : ''}
       <footer>
-        <button class="btn ghost" id="r-select">走者を選びなおす</button>
-        <button class="btn big" id="r-retry">同じ走順でもう一度</button>
+        <button class="btn big" id="r-retry">スキルツリーへ</button>
       </footer>
     </div>
     <img class="result-chris" src="${record ? cat.chars.chrisGuts : cat.chars.chrisIdle}" alt="">`);
@@ -432,11 +437,6 @@ export function resultScreen(run: Run): Promise<After> {
       sfx('go');
       close(el);
       res('retry');
-    });
-    el.querySelector('#r-select')!.addEventListener('click', () => {
-      sfx('ui');
-      close(el);
-      res('select');
     });
   });
 }
@@ -465,6 +465,37 @@ export function pauseScreen(): Promise<'resume' | 'restart' | 'quit'> {
     el.addEventListener('click', (e) => {
       const b = (e.target as HTMLElement).closest<HTMLElement>('[data-a]');
       if (b) fin(b.dataset.a as 'resume' | 'restart' | 'quit');
+    });
+  });
+}
+
+// ------------------------------------------------------------------ out of the race
+/** Cut off before the goal (or outside the qualifying places). Shows how far it went and what it earned. */
+export function outScreen(stage: StageId, res: StageResult, pay: Payout): Promise<void> {
+  sample('lose', 0.5);
+  const m = meta();
+  const left = Math.round((1 - res.progress) * 3000);
+  const el = open(`outrace ${stage}`, `
+    <div class="out-box">
+      <p class="fin">${STAGE_NAME[stage]}・予選</p>
+      <h2>${res.progress >= 1 ? '通過ならず…' : '時間切れ！'}</h2>
+      <p class="place"><b>${res.place}</b>位 <small>/ ${res.field}組（通過は ${res.quota}位まで）</small></p>
+      <div class="howfar"><i style="width:${res.progress * 100}%"></i><u style="left:${m.bestProgress * 100}%"></u></div>
+      <p class="left">${res.progress >= 1 ? 'ゴールはできた。あとは順位だ' : `ゴールまで あと ${left}m`}</p>
+      <ul class="pay">${pay.lines.map((l) => `<li><span>${l.label}</span><b>+${l.ce}</b></li>`).join('')}
+        ${pay.mult !== 1 ? `<li class="mul"><span>賞金アップ</span><b>×${pay.mult.toFixed(2)}</b></li>` : ''}
+        <li class="sum"><span><img src="${cat.icons.ce}" alt=""> 獲得 CE</span><b>+${pay.total}</b></li>
+      </ul>
+      ${pay.feats.length ? `<p class="newfeat">🏅 メダル獲得：${pay.feats.map((f) => f.name).join('、')}</p>` : ''}
+      <p class="hint">CE でスキルツリーを育てて、もう一度。</p>
+      <button class="btn big" id="o-go">スキルツリーへ</button>
+    </div>
+    <img class="result-chris" src="${cat.chars.chrisCry}" alt="">`);
+  return new Promise((r) => {
+    el.querySelector('#o-go')!.addEventListener('click', () => {
+      sfx('ui');
+      close(el);
+      r();
     });
   });
 }

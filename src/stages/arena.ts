@@ -1,15 +1,16 @@
 // Shared 2D action core for the land and sea races: the hero, enemies, the gear that fights on its own,
 // pickups, particles and drawing. Each race adds its own course and rules on top.
 
-import { img, ready, whiteOf } from '../core/assets';
+import { greyOf, img, ready, whiteOf } from '../core/assets';
 import { sample, sfx } from '../core/audio';
 import { cat, KIND_COLOR, RARITY_COLOR, traitsOf, type Ext, type Hero, type Traits } from '../core/catalog';
+import { earn, stats, type Stats } from '../game/meta';
 import { input } from '../core/input';
 import { clamp, dist2, TAU, type Rng, makeRng } from '../core/util';
 import {
   addXp, armorHp, armorRegen, DOWN_PENALTY, heroMul, levelMul, slotPower, takeExt, type Run, type Slot,
 } from '../game/run';
-import type { Host, Stage } from './stage';
+import type { Host, Stage, StageResult } from './stage';
 
 export interface Enemy {
   x: number; y: number; vx: number; vy: number; r: number;
@@ -20,6 +21,34 @@ export interface Enemy {
   xp: number; boss: boolean; elite: boolean; dead: boolean; face: number;
   /** Free for the race to use (home position, phase, ...). */
   ax: number; ay: number; tier: number; asleep: boolean;
+  /** Who it is after, and when it next looks around. */
+  tg: Runner | null; tgT: number; stun: number;
+}
+/** Anyone in the race: the player's hero and the rivals share this shape. */
+export interface Runner {
+  x: number; y: number; vx: number; vy: number; r: number; hp: number; maxHp: number;
+  fx: number; fy: number; flip: boolean; inv: number; dashT: number; dashCd: number; speed: number; regen: number;
+  moving: boolean; bob: number;
+  art: Hero; me: boolean; name: string;
+  /** Knocked out (seconds left), stopped by the referee (seconds left), foul points so far. */
+  ko: number; frozen: number; fouls: number;
+  slow: number; buffSpd: number; buffDmg: number; buffAmt: number; decoy: number; boost: number;
+  done: boolean; place: number;
+  pUsed: boolean; pCd: number; pTick: number;
+  /** Rivals: how fast they like to run, how hard their gear hits, how rough they play. */
+  pace: number; dps: number; mood: number; laneY: number; think: number; atk: number; quota: number;
+  strikeT: number; near: boolean; gate: number;
+}
+/** A referee standing on the course. Fouls only count inside the circle they can see. */
+export interface Referee { x: number; y: number; r: number; homeY: number; t: number; alert: number }
+export function makeRunner(art: Hero, me: boolean): Runner {
+  return {
+    x: 0, y: 0, vx: 0, vy: 0, r: 15, hp: 100, maxHp: 100, fx: 1, fy: 0, flip: true, inv: 0, dashT: 0, dashCd: 0,
+    speed: 190, regen: 0, moving: false, bob: Math.random() * 6, art, me, name: art.name,
+    ko: 0, frozen: 0, fouls: 0, slow: 0, buffSpd: 0, buffDmg: 0, buffAmt: 0, decoy: 0, boost: 0, done: false, place: 0,
+    pUsed: false, pCd: 2, pTick: 6 + Math.random() * 6,
+    pace: 180, dps: 20, mood: 0, laneY: 500, think: 0, atk: 0, quota: 0, strikeT: 0, near: true, gate: 0,
+  };
 }
 export interface Shot {
   x: number; y: number; vx: number; vy: number; r: number; dmg: number; pierce: number; life: number;
@@ -46,14 +75,19 @@ export abstract class Arena implements Stage {
   camY = 0;
   time = 0;
   finished = false;
+  result?: StageResult;
   run: Run;
   heroArt: Hero;
   traits: Traits;
   rng: Rng;
-  hero = {
-    x: 0, y: 0, vx: 0, vy: 0, r: 15, hp: 100, maxHp: 100, fx: 1, fy: 0, flip: false,
-    inv: 0, dashT: 0, dashCd: 0, speed: 230, regen: 0, moving: false, bob: 0,
-  };
+  hero: Runner;
+  rivals: Runner[] = [];
+  refs: Referee[] = [];
+  st: Stats;
+  /** Races with rivals: going down means a few seconds out cold, not a time penalty. */
+  koMode = false;
+  strikeCd = 0;
+  private started = false;
   enemies: Enemy[] = [];
   shots: Shot[] = [];
   ebullets: EBullet[] = [];
@@ -75,6 +109,8 @@ export abstract class Arena implements Stage {
     this.run = host.run;
     this.heroArt = this.run.heroes[heroIndex];
     this.traits = traitsOf(this.heroArt);
+    this.st = stats();
+    this.hero = makeRunner(this.heroArt, true);
     this.rng = makeRng(host.seed + seedSalt);
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'game-canvas';
@@ -85,8 +121,8 @@ export abstract class Arena implements Stage {
     const h = this.hero;
     h.maxHp = this.fullHp();
     h.hp = h.maxHp;
-    h.speed = 230 * (0.86 + 0.14 * this.traits.agi);
-    h.regen = armorRegen(this.run);
+    h.speed = 160 * (0.86 + 0.14 * this.traits.agi) * this.st.speed;
+    h.regen = armorRegen(this.run) + this.st.regen;
     img(this.heroArt.img);
     for (const s of this.run.slots) img(s.ext.img);
   }
@@ -116,7 +152,7 @@ export abstract class Arena implements Stage {
 
   /** Full life bar for this race (oxygen under the sea). */
   protected fullHp(): number {
-    return Math.round(100 * this.traits.hp + armorHp(this.run));
+    return Math.round((100 * this.traits.hp + armorHp(this.run)) * this.st.hp);
   }
 
   // ------------------------------------------------------------------ hooks for the race
@@ -133,6 +169,11 @@ export abstract class Arena implements Stage {
   protected killed(_e: Enemy): void {}
   protected onDown(): void {}
   protected bossAI(_e: Enemy, _dt: number): void {}
+  protected rivalAI(_r: Runner, _dt: number): void {}
+  /** Called for every blow that lands on an enemy (`by` is a rival, or null for the player). */
+  protected onHit(_e: Enemy, _dmg: number, _by: Runner | null): void {}
+  protected onKo(_r: Runner): void {}
+  protected onFoul(_r: Runner): void {}
   protected heroControl(dt: number): void {
     this.walk(dt, 1);
   }
@@ -146,19 +187,282 @@ export abstract class Arena implements Stage {
     }
     this.time += dt;
     const h = this.hero;
-    h.inv = Math.max(0, h.inv - dt);
     h.dashCd = Math.max(0, h.dashCd - dt);
-    if (h.regen > 0 && h.hp > 0) h.hp = Math.min(h.maxHp, h.hp + h.regen * dt);
-    this.heroControl(dt);
+    this.strikeCd = Math.max(0, this.strikeCd - dt);
+    if (h.regen > 0 && h.hp > 0 && h.ko <= 0) h.hp = Math.min(h.maxHp, h.hp + h.regen * dt);
+    if (!this.started) {
+      this.started = true;
+      h.boost = Math.max(h.boost, this.st.rocket);
+      this.passive(h, 'start');
+      for (const r of this.rivals) this.passive(r, 'start');
+    }
+    this.timers(h, dt);
+    for (const r of this.rivals) if (!r.done) this.timers(r, dt);
+    if (h.ko > 0 || h.frozen > 0) {
+      h.vx = h.vy = 0;
+      h.moving = false;
+    } else {
+      this.heroControl(dt);
+    }
+    for (const r of this.rivals) if (!r.done && r.ko <= 0 && r.frozen <= 0) this.rivalAI(r, dt);
+    for (const f of this.refs) {
+      f.t += dt;
+      f.alert = Math.max(0, f.alert - dt);
+      f.y = f.homeY + Math.sin(f.t * 0.5) * 150;
+    }
+    this.crowd();
     this.tick(dt);
     if (this.finished) return;
-    this.weapons(dt);
+    if (h.ko <= 0 && h.frozen <= 0) this.weapons(dt);
     this.stepShots(dt);
     this.stepEnemies(dt);
     this.stepBullets(dt);
     this.stepLoot(dt);
     this.stepFx(dt);
     this.shake = Math.max(0, this.shake - dt * 30);
+  }
+
+  /** Counts down everything that wears off, and gets the knocked-out back on their feet. */
+  private timers(r: Runner, dt: number): void {
+    r.inv = Math.max(0, r.inv - dt);
+    r.slow = Math.max(0, r.slow - dt);
+    r.buffSpd = Math.max(0, r.buffSpd - dt);
+    r.buffDmg = Math.max(0, r.buffDmg - dt);
+    r.decoy = Math.max(0, r.decoy - dt);
+    r.boost = Math.max(0, r.boost - dt);
+    r.pCd = Math.max(0, r.pCd - dt);
+    if (r.frozen > 0) r.frozen = Math.max(0, r.frozen - dt);
+    if (r.ko > 0) {
+      r.ko -= dt;
+      if (r.ko <= 0) {
+        r.ko = 0;
+        r.hp = r.maxHp * (r.me ? this.st.revive : 0.5);
+        r.inv = 2;
+        if (r.me) {
+          sample('heal', 0.5);
+          this.rings.push({ x: r.x, y: r.y, r: 10, max: 120, t: 0, color: '#7dffb0' });
+        }
+      }
+      return;
+    }
+    const p = r.art.passive;
+    if (!p) return;
+    if (p.trig === 'hp' && !r.pUsed && r.hp < r.maxHp * (p.pct / 100)) this.passive(r, 'hp');
+    if (p.trig === 'tick') {
+      r.pTick -= dt;
+      if (r.pTick <= 0) {
+        r.pTick = 10;
+        this.passive(r, 'tick');
+      }
+    }
+  }
+
+  /** Runners shoulder each other aside instead of standing on one spot. */
+  private crowd(): void {
+    const all = this.rivals;
+    const h = this.hero;
+    for (let i = 0; i < all.length; i++) {
+      const a = all[i];
+      if (a.done || !a.near) continue;
+      for (let j = i + 1; j < all.length; j++) {
+        const b = all[j];
+        if (b.done || !b.near) continue;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        if (Math.abs(dx) > 26 || Math.abs(dy) > 26) continue;
+        const d = Math.hypot(dx, dy) || 1;
+        if (d < 26) {
+          const p = (26 - d) / d * 0.5;
+          this.moveBody(a, -dx * p, -dy * p);
+          this.moveBody(b, dx * p, dy * p);
+        }
+      }
+      // the player's dash is a legal shoulder charge
+      const dx = a.x - h.x;
+      const dy = a.y - h.y;
+      const d = Math.hypot(dx, dy) || 1;
+      if (d < 30 && h.ko <= 0) {
+        if (h.dashT > 0 && a.ko <= 0) {
+          a.vx += h.fx * 520 * this.st.bump + (dx / d) * 160;
+          a.vy += h.fy * 520 * this.st.bump + (dy / d) * 160;
+          a.slow = Math.max(a.slow, 0.5 * this.st.bump);
+          if (a.strikeT <= 0) {
+            a.strikeT = 0.4;
+            this.puff(a.x, a.y, '#ffffff', 5);
+            sfx('hit');
+            this.host.hud.say(`${this.heroArt.name}、${a.name}を体当たりで押しのけた！`, 1);
+          }
+        } else {
+          const p = ((30 - d) / d) * 0.5;
+          this.moveBody(a, dx * p, dy * p);
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------ passive skills
+  /** Tries to fire a runner's passive skill for the given moment. True when it went off. */
+  passive(r: Runner, trig: 'start' | 'hp' | 'hurt' | 'skill' | 'death' | 'tick'): boolean {
+    const p = r.art.passive;
+    if (!p || p.trig !== trig || r.pCd > 0) return false;
+    if (p.once && r.pUsed) return false;
+    const chance = (p.rate / 100) * (r.me ? this.st.passive : 1) * (trig === 'skill' ? 0.5 : 1);
+    r.pCd = trig === 'skill' ? 7 : trig === 'hurt' ? 5 : 4;
+    if (Math.random() > chance) return false;
+    r.pUsed = true;
+    for (const f of p.fx) {
+      if (f.t === 'revive') {
+        if (r.ko > 0) {
+          r.ko = 0;
+          r.hp = r.maxHp * clamp(f.v / 100, 0.2, 1);
+          r.inv = 2.5;
+        }
+      } else if (f.t === 'buff') {
+        if (f.stat === 'agi') r.buffSpd = 6;
+        else {
+          r.buffDmg = 9;
+          r.buffAmt = clamp(f.v / 100, 0.15, 0.6);
+        }
+      } else if (f.t === 'heal') {
+        r.hp = Math.min(r.maxHp, r.hp + r.maxHp * clamp(f.v / 200, 0.1, 0.5));
+      } else if (f.t === 'barrier') {
+        r.inv = Math.max(r.inv, 3.5);
+      } else if (f.t === 'decoy') {
+        r.decoy = 5;
+      } else if (f.t === 'dmg') {
+        const power = (60 + f.v * 0.6) * (r.me ? levelMul(this.run.level) : 1);
+        if (f.all) this.blast(r.x, r.y, 280, power, '#ffe45c');
+        else {
+          let best: Enemy | null = null;
+          for (const e of this.enemies) if (!e.dead && !e.asleep && dist2(e.x, e.y, r.x, r.y) < 520 * 520 && (!best || e.hp > best.hp)) best = e;
+          if (best) this.blast(best.x, best.y, 70, power * 3, '#ffe45c');
+        }
+      } else if (f.t === 'debuff' || f.t === 'sleep') {
+        // the original weakens "the enemy side": here that is the monsters nearby, and it trips up rivals too
+        for (const e of this.enemies) {
+          if (e.dead || e.asleep || dist2(e.x, e.y, r.x, r.y) > 330 * 330) continue;
+          if (f.t === 'sleep') e.stun = e.boss ? 0.8 : 2.5;
+          else e.slow = 4;
+        }
+        for (const o of [this.hero, ...this.rivals]) {
+          if (o === r || o.done || o.ko > 0 || dist2(o.x, o.y, r.x, r.y) > 260 * 260) continue;
+          o.slow = Math.max(o.slow, f.t === 'sleep' ? 1.2 : 1.6);
+        }
+        this.rings.push({ x: r.x, y: r.y, r: 10, max: 330, t: 0, color: '#b58bff' });
+      }
+    }
+    this.rings.push({ x: r.x, y: r.y, r: 10, max: 110, t: 0, color: '#ffe45c' });
+    if (r.me) {
+      sample('buff', 0.7);
+      sfx('levelup');
+      this.host.hud.cutin(r.art.img, p.name, p.text);
+      earn('passive');
+    }
+    if (r.me || r.near) this.host.hud.say(`${r.name}のパッシブ「${p.name}」発動！`, r.me ? 3 : 1, 'ain');
+    return true;
+  }
+
+  // ------------------------------------------------------------------ the direct attack (and the referee)
+  /** A swing at whatever is in front. It hurts rivals too, and that is a foul. */
+  protected strike(): void {
+    const h = this.hero;
+    if (this.strikeCd > 0 || h.ko > 0 || h.frozen > 0) return;
+    this.strikeCd = 0.65;
+    const R = 86;
+    // swing at the nearest monster if one is in reach, otherwise straight ahead
+    const near = this.nearest(h.x, h.y, R + 30);
+    const ang = near ? Math.atan2(near.y - h.y, near.x - h.x) : Math.atan2(h.fy, h.fx);
+    const sx = Math.cos(ang);
+    const sy = Math.sin(ang);
+    this.arcs.push({ x: h.x, y: h.y, ang, r: R, t: 0, color: '#ffffff' });
+    sfx('slash');
+    const inArc = (x: number, y: number, r: number) => {
+      const d = Math.hypot(x - h.x, y - h.y);
+      if (d > R + r) return false;
+      let da = Math.atan2(y - h.y, x - h.x) - ang;
+      da = Math.atan2(Math.sin(da), Math.cos(da));
+      return Math.abs(da) < 1.2 || d < r + 22;
+    };
+    const dmg = 13 * this.traits.phy * this.st.strike * levelMul(this.run.level);
+    for (const e of this.enemies) if (!e.dead && !e.asleep && inArc(e.x, e.y, e.r)) this.hitEnemy(e, dmg, sx * 160, sy * 160);
+    let hit = 0;
+    for (const r of this.rivals) {
+      if (r.done || r.ko > 0 || !inArc(r.x, r.y, r.r)) continue;
+      hit++;
+      this.hurtRunner(r, 16 * this.st.strike, h.x, h.y, h);
+      r.vx += sx * 380;
+      r.vy += sy * 380;
+      r.slow = Math.max(r.slow, 0.8);
+    }
+    if (hit) {
+      const ref = this.watching(h.x, h.y);
+      if (ref) {
+        ref.alert = 1;
+        this.foul(h, Math.min(2, hit));
+      } else {
+        this.host.hud.say(`${this.heroArt.name}、審判の死角で一撃！ これはおとがめなし！`, 2);
+      }
+    }
+  }
+
+  /** The referee who can see this spot, if any. */
+  watching(x: number, y: number): Referee | null {
+    for (const f of this.refs) if (dist2(f.x, f.y, x, y) < f.r * f.r) return f;
+    return null;
+  }
+
+  /** Adds foul points; too many and the referee stops the runner where they stand. */
+  foul(r: Runner, n: number): void {
+    r.fouls += n;
+    const limit = r.me ? this.st.foulLimit : 5;
+    if (r.me) {
+      sfx('warn');
+      this.host.hud.fouls(r.fouls, limit);
+    }
+    if (r.fouls >= limit) {
+      r.fouls = 0;
+      r.frozen = 3 * (r.me ? this.st.freeze : 1);
+      r.vx = r.vy = 0;
+      if (r.me) {
+        this.host.hud.banner('反則！', '審判に止められた', 'warn');
+        this.host.hud.fouls(0, limit);
+        sample('lose', 0.5);
+        earn('foul');
+      }
+      if (r.me || r.near) this.host.hud.say(`ピピーッ！ ${r.name}に反則！ その場で静止です！`, 3);
+      this.onFoul(r);
+    }
+  }
+
+  /** Damage to anyone in the race. `by` is the runner who did it (for the commentary). */
+  hurtRunner(r: Runner, dmg: number, fromX?: number, fromY?: number, by?: Runner): void {
+    if (r.me) {
+      this.hurtHero(dmg, fromX, fromY, by);
+      return;
+    }
+    if (r.inv > 0 || r.ko > 0 || r.done) return;
+    r.hp -= dmg;
+    r.inv = 0.45;
+    if (fromX !== undefined && fromY !== undefined) {
+      const a = Math.atan2(r.y - fromY, r.x - fromX);
+      r.vx += Math.cos(a) * 200;
+      r.vy += Math.sin(a) * 200;
+    }
+    this.passive(r, 'hurt');
+    if (r.hp <= 0) this.knockOut(r, by);
+  }
+
+  private knockOut(r: Runner, by?: Runner): void {
+    r.hp = 0;
+    r.ko = 3.5 * (r.me ? this.st.ko : 1);
+    r.vx = r.vy = 0;
+    r.dashT = 0;
+    this.puff(r.x, r.y, '#ffffff', 14);
+    if (r.me || r.near) {
+      this.host.hud.say(by ? `${by.name}の一撃！ ${r.name}が気絶！` : `ああっと！ ${r.name}が気絶！`, r.me ? 3 : 1);
+    }
+    this.onKo(r);
+    this.passive(r, 'death');
   }
 
   /** Eight-way movement with a little easing. `drag` < 1 gives the floaty feel under water. */
@@ -174,10 +478,11 @@ export abstract class Arena implements Stage {
       if (Math.abs(mx) > 0.2) h.flip = mx > 0;
       h.bob += dt * 11;
     }
-    let sp = h.speed;
+    let sp = h.speed * (h.slow > 0 ? 0.6 + 0.4 * Math.min(1, this.st.grit) : 1) * (h.buffSpd > 0 ? 1.25 : 1) * (h.boost > 0 ? 1.4 : 1);
+    if (this.st.draft > 0 && this.drafting()) sp *= 1 + this.st.draft;
     if (h.dashT > 0) {
       h.dashT -= dt;
-      sp *= 2.9;
+      sp *= 2.5;
       h.vx = h.fx * sp;
       h.vy = h.fy * sp;
       if (Math.random() < 0.7) this.puff(h.x, h.y + 10, '#ffffff', 1);
@@ -189,11 +494,24 @@ export abstract class Arena implements Stage {
     this.moveBody(h, h.vx * dt, h.vy * dt);
   }
 
+  /** True while the hero is tucked in right behind another runner. */
+  drafting(): boolean {
+    const h = this.hero;
+    for (const r of this.rivals) {
+      if (r.done || r.ko > 0) continue;
+      const dx = r.x - h.x;
+      const dy = r.y - h.y;
+      const along = dx * h.fx + dy * h.fy;
+      if (along > 20 && along < 130 && Math.abs(dx * h.fy - dy * h.fx) < 30) return true;
+    }
+    return false;
+  }
+
   protected dash(): boolean {
     const h = this.hero;
     if (h.dashCd > 0 || h.dashT > 0) return false;
     h.dashT = 0.2;
-    h.dashCd = 1.4;
+    h.dashCd = 1.4 * this.st.dashCd;
     h.inv = Math.max(h.inv, 0.32);
     sfx('dash');
     return true;
@@ -215,12 +533,13 @@ export abstract class Arena implements Stage {
   }
 
   private dmgOf(s: Slot): number {
-    return slotPower(s) * heroMul(this.traits, s.ext) * levelMul(this.run.level);
+    return slotPower(s) * heroMul(this.traits, s.ext) * levelMul(this.run.level) * (this.hero.buffDmg > 0 ? 1 + this.hero.buffAmt : 1);
   }
 
   private weapons(dt: number): void {
     const h = this.hero;
-    const cdMul = 1 / (0.82 + 0.18 * this.traits.agi);
+    const cdMul = this.st.cd / (0.82 + 0.18 * this.traits.agi);
+    let fired = false;
     for (const s of this.run.slots) {
       const k = s.ext.kind;
       if (k === 'armor') continue;
@@ -270,6 +589,7 @@ export abstract class Arena implements Stage {
         }
         this.arcs.push({ x: h.x, y: h.y, ang, r: R, t: 0, color });
         sfx('slash', 0.08);
+        fired = true;
         w.cd = 0.85 * cdMul;
       } else if (k === 'shot') {
         const t = this.nearest(h.x, h.y, 540);
@@ -336,9 +656,12 @@ export abstract class Arena implements Stage {
         }
         this.rings.push({ x: h.x, y: h.y, r: 10, max: R, t: 0, color });
         sfx('aura', 0.12);
+        fired = true;
         w.cd = 1.7 * cdMul;
       }
     }
+    // "after using an active skill": the gear going off is this game's active skill
+    if (fired) this.passive(h, 'skill');
   }
 
   private stepShots(dt: number): void {
@@ -396,27 +719,34 @@ export abstract class Arena implements Stage {
     this.puff(x, y, color, 8);
   }
 
-  hitEnemy(e: Enemy, dmg: number, kx: number, ky: number): void {
+  hitEnemy(e: Enemy, dmg: number, kx: number, ky: number, by: Runner | null = null): void {
     if (e.dead) return;
-    const crit = Math.random() < 0.08;
+    const crit = !by && Math.random() < this.st.crit;
     const d = Math.max(1, Math.round(dmg * (crit ? 1.8 : 1) * (0.9 + Math.random() * 0.2)));
     e.hp -= d;
     e.flash = 0.1;
     const res = e.boss ? 0.05 : e.elite ? 0.3 : 1;
     e.kx += kx * res;
     e.ky += ky * res;
-    if (this.floats.length < 60) {
+    if (!by && this.floats.length < 60) {
       this.floats.push({
         x: e.x + (Math.random() - 0.5) * 20, y: e.y - e.size * 0.4, text: String(d),
         color: crit ? '#ffe45c' : '#ffffff', t: 0, big: crit,
       });
     }
-    sfx('hit', 0.05);
-    if (e.hp <= 0) this.kill(e);
+    if (!by) sfx('hit', 0.05);
+    this.onHit(e, d, by);
+    if (e.hp <= 0) this.kill(e, by);
   }
 
-  private kill(e: Enemy): void {
+  private kill(e: Enemy, by: Runner | null): void {
     e.dead = true;
+    if (by) {
+      // a rival's kill: no loot for the player
+      this.puff(e.x, e.y, '#ffffff', 5);
+      this.killed(e);
+      return;
+    }
     this.run.kills += 1;
     this.puff(e.x, e.y, '#ffffff', e.boss ? 40 : e.elite ? 18 : 7);
     this.puff(e.x, e.y, '#ffb35c', e.boss ? 30 : 4);
@@ -438,10 +768,10 @@ export abstract class Arena implements Stage {
     this.killed(e);
   }
 
-  hurtHero(dmg: number, fromX?: number, fromY?: number): void {
+  hurtHero(dmg: number, fromX?: number, fromY?: number, by?: Runner): void {
     const h = this.hero;
-    if (h.inv > 0 || this.finished) return;
-    h.hp -= dmg;
+    if (h.inv > 0 || h.ko > 0 || this.finished) return;
+    h.hp -= dmg * this.st.guard;
     h.inv = 0.7;
     this.shake = Math.max(this.shake, 8);
     sfx('hurt');
@@ -451,7 +781,16 @@ export abstract class Arena implements Stage {
       h.vx += Math.cos(a) * 260;
       h.vy += Math.sin(a) * 260;
     }
-    if (h.hp <= 0) this.down();
+    this.passive(h, 'hurt');
+    if (h.hp <= 0) {
+      if (this.koMode) {
+        this.run.downs += 1;
+        this.shake = 16;
+        sfx('down');
+        this.host.hud.banner('気絶！', '', 'warn');
+        this.knockOut(h, by);
+      } else this.down();
+    }
   }
 
   /** No game over: the hero gets back up, and the clock takes the hit. */
@@ -481,8 +820,9 @@ export abstract class Arena implements Stage {
     const e: Enemy = {
       x, y, vx: 0, vy: 0, r: 18, hp: 20, maxHp: 20, speed: 90, dmg: 10, url: art.url, size: 64, name: art.name,
       ai: 'chase', state: 0, timer: 0, t: Math.random() * 10, flash: 0, slow: 0, orbitCd: 0, kx: 0, ky: 0, xp: 1,
-      boss: false, elite: false, dead: false, face: 1, ax: x, ay: y, tier: 0, asleep: false, ...o,
+      boss: false, elite: false, dead: false, face: 1, ax: x, ay: y, tier: 0, asleep: false, tg: null, tgT: 0, stun: 0, ...o,
     };
+    if (!e.boss) e.hp *= this.st.enemyHp;
     e.maxHp = e.hp;
     img(e.url);
     this.enemies.push(e);
@@ -506,8 +846,32 @@ export abstract class Arena implements Stage {
       e.flash = Math.max(0, e.flash - dt);
       e.orbitCd = Math.max(0, e.orbitCd - dt);
       e.slow = Math.max(0, e.slow - dt);
-      const dx = h.x - e.x;
-      const dy = h.y - e.y;
+      if (e.stun > 0) {
+        e.stun -= dt;
+        e.flash = 0;
+        continue;
+      }
+      // look around now and then for the closest runner still on their feet
+      e.tgT -= dt;
+      if (e.tgT <= 0 || !e.tg || e.tg.ko > 0 || e.tg.done) {
+        e.tgT = 0.5 + Math.random() * 0.3;
+        let best: Runner = h;
+        let bd = h.ko > 0 || h.decoy > 0 ? 1e12 : dist2(h.x, h.y, e.x, e.y);
+        if (!e.boss) {
+          for (const r of this.rivals) {
+            if (r.done || r.ko > 0 || r.decoy > 0 || !r.near) continue;
+            const d = dist2(r.x, r.y, e.x, e.y);
+            if (d < bd) {
+              bd = d;
+              best = r;
+            }
+          }
+        }
+        e.tg = best;
+      }
+      const tg = e.tg;
+      const dx = tg.x - e.x;
+      const dy = tg.y - e.y;
       const d = Math.hypot(dx, dy) || 1;
       const ux = dx / d;
       const uy = dy / d;
@@ -637,7 +1001,10 @@ export abstract class Arena implements Stage {
       e.ky *= Math.pow(0.002, dt);
       if (mx || my) this.moveBody(e, mx * dt, my * dt);
       if (Math.abs(dx) > 6 && e.ai !== 'patrol') e.face = dx > 0 ? 1 : -1;
-      if (d < e.r + h.r - 2) this.hurtHero(e.dmg, e.x, e.y);
+      if (d < e.r + tg.r - 2 && tg.ko <= 0) {
+        tg.slow = Math.max(tg.slow, 0.3);
+        this.hurtRunner(tg, e.dmg, e.x, e.y);
+      }
     }
     // keep the crowd from stacking into a single point
     const list = this.enemies;
@@ -671,9 +1038,18 @@ export abstract class Arena implements Stage {
       b.x += b.vx * dt;
       b.y += b.vy * dt;
       if (this.blocked(b.x, b.y)) b.life = 0;
-      else if (dist2(b.x, b.y, h.x, h.y) < (b.r + h.r - 4) ** 2) {
+      else if (h.ko <= 0 && dist2(b.x, b.y, h.x, h.y) < (b.r + h.r - 4) ** 2) {
         b.life = 0;
         this.hurtHero(b.dmg, b.x - b.vx, b.y - b.vy);
+      } else {
+        for (const r of this.rivals) {
+          if (r.done || !r.near || r.ko > 0) continue;
+          if (dist2(b.x, b.y, r.x, r.y) < (b.r + r.r - 4) ** 2) {
+            b.life = 0;
+            this.hurtRunner(r, b.dmg, b.x - b.vx, b.y - b.vy);
+            break;
+          }
+        }
       }
     }
     this.ebullets = this.ebullets.filter((b) => b.life > 0);
@@ -684,7 +1060,7 @@ export abstract class Arena implements Stage {
     for (const g of this.gems) {
       g.t += dt;
       const d2 = dist2(g.x, g.y, h.x, h.y);
-      if (d2 < 130 * 130 || g.t > 6) {
+      if (h.ko <= 0 && (d2 < (130 * this.st.magnet) ** 2 || g.t > 6)) {
         const d = Math.sqrt(d2) || 1;
         const sp = 520 + g.t * 200;
         g.x += ((h.x - g.x) / d) * sp * dt;
@@ -693,13 +1069,13 @@ export abstract class Arena implements Stage {
       if (d2 < 24 * 24) {
         g.v = -g.v;
         sfx('gem', 0.03);
-        if (addXp(this.run, -g.v)) this.levelUp();
+        if (addXp(this.run, -g.v * this.st.xp)) this.levelUp();
       }
     }
     this.gems = this.gems.filter((g) => g.v > 0);
     for (const p of this.pickups) {
       p.t += dt;
-      if (!p.taken && dist2(p.x, p.y, h.x, h.y) < 40 * 40) {
+      if (!p.taken && h.ko <= 0 && dist2(p.x, p.y, h.x, h.y) < 40 * 40) {
         p.taken = true;
         this.gain(p.ext, p.x, p.y);
       }
@@ -725,7 +1101,7 @@ export abstract class Arena implements Stage {
       h.maxHp += extra;
       h.hp += extra;
     }
-    h.regen = armorRegen(this.run);
+    h.regen = armorRegen(this.run) + this.st.regen;
     sfx('pickup');
     sample('buff', 0.35);
     const label = res.kind === 'new' ? 'GET!' : res.kind === 'up' ? `Lv${res.slot.lv}` : 'MAX';
@@ -768,10 +1144,10 @@ export abstract class Arena implements Stage {
   }
 
   // ------------------------------------------------------------------ drawing
-  sprite(g: CanvasRenderingContext2D, url: string, x: number, y: number, size: number, flip: boolean, flash = false): void {
+  sprite(g: CanvasRenderingContext2D, url: string, x: number, y: number, size: number, flip: boolean, flash = false, grey = false): void {
     const im = img(url);
     if (!ready(im)) return;
-    const src: CanvasImageSource = flash ? whiteOf(url) ?? im : im;
+    const src: CanvasImageSource = grey ? greyOf(url) ?? im : flash ? whiteOf(url) ?? im : im;
     const hs = size / 2;
     if (flip) {
       g.save();
@@ -800,6 +1176,38 @@ export abstract class Arena implements Stage {
     const y0 = this.camY - 80;
     const y1 = this.camY + this.vh + 80;
     const seen = (x: number, y: number) => x > x0 && x < x1 && y > y0 && y < y1;
+
+    // referees and what they can see
+    for (const f of this.refs) {
+      if (f.x < x0 - f.r || f.x > x1 + f.r) continue;
+      const hot = f.alert > 0;
+      g.fillStyle = hot ? 'rgba(255,92,122,0.28)' : 'rgba(255,228,92,0.10)';
+      g.beginPath();
+      g.arc(f.x, f.y, f.r, 0, TAU);
+      g.fill();
+      g.strokeStyle = hot ? '#ff5c7a' : 'rgba(255,228,92,0.75)';
+      g.lineWidth = 3;
+      g.setLineDash([14, 10]);
+      g.lineDashOffset = -this.time * 30;
+      g.beginPath();
+      g.arc(f.x, f.y, f.r, 0, TAU);
+      g.stroke();
+      g.setLineDash([]);
+      const im = img(hot ? cat.chars.refAngry : cat.chars.ref);
+      if (ready(im)) {
+        const hh = 64;
+        const ww = (im.naturalWidth / im.naturalHeight) * hh;
+        g.fillStyle = 'rgba(0,0,0,0.3)';
+        g.beginPath();
+        g.ellipse(f.x, f.y + hh / 2 - 2, 18, 6, 0, 0, TAU);
+        g.fill();
+        g.drawImage(im, Math.round(f.x - ww / 2), Math.round(f.y - hh / 2), ww, hh);
+      }
+      g.fillStyle = hot ? '#ff5c7a' : '#ffe45c';
+      g.font = '11px DotGothic16, sans-serif';
+      g.textAlign = 'center';
+      g.fillText(hot ? 'ピピーッ！' : '審判', f.x, f.y - 38);
+    }
 
     // loot
     const ce = img(cat.icons.ce);
@@ -857,15 +1265,57 @@ export abstract class Arena implements Stage {
       }
     }
 
+    // the rivals
+    g.font = '10px DotGothic16, sans-serif';
+    g.textAlign = 'center';
+    for (const r of this.rivals) {
+      if (r.done || !seen(r.x, r.y)) continue;
+      g.fillStyle = 'rgba(0,0,0,0.26)';
+      g.beginPath();
+      g.ellipse(r.x, r.y + 24, 17, 6, 0, 0, TAU);
+      g.fill();
+      const out = r.ko > 0;
+      const bob = out ? 6 : r.moving ? Math.abs(Math.sin(r.bob)) * -4 : 0;
+      if (r.inv > 0 && !out && Math.floor(this.time * 20) % 2 === 0) g.globalAlpha = 0.55;
+      if (r.buffSpd > 0 || r.boost > 0) {
+        g.globalAlpha = 0.3;
+        this.sprite(g, r.art.img, r.x - r.vx * 0.06, r.y + bob, 56, r.flip);
+        g.globalAlpha = 1;
+      }
+      this.sprite(g, r.art.img, r.x, r.y + bob, 56, r.flip, false, out);
+      g.globalAlpha = 1;
+      this.mark(g, r);
+      g.fillStyle = 'rgba(0,0,0,0.55)';
+      const w = g.measureText(r.name).width + 6;
+      g.fillRect(r.x - w / 2, r.y + 30, w, 12);
+      g.fillStyle = out ? '#9aa2c7' : '#ffffff';
+      g.fillText(r.name, r.x, r.y + 39);
+    }
+
     // the hero
-    const blink = h.inv > 0 && Math.floor(this.time * 20) % 2 === 0;
+    const blink = h.inv > 0 && h.ko <= 0 && Math.floor(this.time * 20) % 2 === 0;
     if (this.shadows) {
       g.fillStyle = 'rgba(0,0,0,0.3)';
       g.beginPath();
       g.ellipse(h.x, h.y + 26, 20, 7, 0, 0, TAU);
       g.fill();
     }
+    if (this.rivals.length) {
+      g.strokeStyle = '#ffe45c';
+      g.lineWidth = 2;
+      g.beginPath();
+      g.ellipse(h.x, h.y + 26, 24, 9, 0, 0, TAU);
+      g.stroke();
+      g.fillStyle = '#ffe45c';
+      const by = h.y - 46 + Math.sin(this.time * 6) * 3;
+      g.beginPath();
+      g.moveTo(h.x, by + 8);
+      g.lineTo(h.x - 7, by - 2);
+      g.lineTo(h.x + 7, by - 2);
+      g.fill();
+    }
     this.drawHero(g, blink);
+    this.mark(g, h);
 
     // orbiting gear
     for (const s of this.run.slots) {
@@ -989,9 +1439,44 @@ export abstract class Arena implements Stage {
   protected drawHero(g: CanvasRenderingContext2D, blink: boolean): void {
     const h = this.hero;
     if (blink) g.globalAlpha = 0.45;
-    const bob = h.moving ? Math.abs(Math.sin(h.bob)) * -4 : 0;
-    this.sprite(g, this.heroArt.img, h.x, h.y + bob, 64, h.flip);
+    const out = h.ko > 0;
+    const bob = out ? 6 : h.moving ? Math.abs(Math.sin(h.bob)) * -4 : 0;
+    if (!out && (h.boost > 0 || h.buffSpd > 0)) {
+      g.globalAlpha = 0.3;
+      this.sprite(g, this.heroArt.img, h.x - h.vx * 0.07, h.y + bob - h.vy * 0.07, 64, h.flip);
+      g.globalAlpha = blink ? 0.45 : 1;
+    }
+    this.sprite(g, this.heroArt.img, h.x, h.y + bob, 64, h.flip, false, out);
     g.globalAlpha = 1;
+  }
+
+  /** Stars over the knocked-out, a whistle over the penalised, a glow on the buffed. */
+  private mark(g: CanvasRenderingContext2D, r: Runner): void {
+    if (r.ko > 0) {
+      g.fillStyle = '#ffe45c';
+      for (let i = 0; i < 3; i++) {
+        const a = this.time * 5 + (i / 3) * TAU;
+        g.fillRect(r.x + Math.cos(a) * 16 - 2, r.y - 30 + Math.sin(a) * 5 - 2, 5, 5);
+      }
+    } else if (r.frozen > 0) {
+      g.fillStyle = '#ff5c7a';
+      g.fillRect(r.x - 9, r.y - 48, 18, 14);
+      g.fillStyle = '#fff';
+      g.font = '10px DotGothic16, sans-serif';
+      g.textAlign = 'center';
+      g.fillText('反則', r.x, r.y - 37);
+      g.strokeStyle = '#ff5c7a';
+      g.lineWidth = 2;
+      g.beginPath();
+      g.arc(r.x, r.y, 26, 0, TAU * (r.frozen / 3));
+      g.stroke();
+    } else if (r.buffDmg > 0) {
+      g.strokeStyle = 'rgba(255,120,90,0.8)';
+      g.lineWidth = 2;
+      g.beginPath();
+      g.arc(r.x, r.y, 24 + Math.sin(this.time * 10) * 2, 0, TAU);
+      g.stroke();
+    }
   }
 
   /** Screen-space extras (darkness, arrows). Drawn after the world, in view coordinates. */

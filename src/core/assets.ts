@@ -44,3 +44,22 @@ export function whiteOf(url: string): HTMLCanvasElement | null {
   whites.set(url, c);
   return c;
 }
+
+const greys = new Map<string, HTMLCanvasElement>();
+/** A greyed-out copy of the image, for a runner who is out cold. */
+export function greyOf(url: string): HTMLCanvasElement | null {
+  const hit = greys.get(url);
+  if (hit) return hit;
+  const im = img(url);
+  if (!ready(im)) return null;
+  const c = document.createElement('canvas');
+  c.width = im.naturalWidth;
+  c.height = im.naturalHeight;
+  const g = c.getContext('2d')!;
+  g.drawImage(im, 0, 0);
+  g.globalCompositeOperation = 'source-atop';
+  g.fillStyle = 'rgba(96,98,112,0.82)';
+  g.fillRect(0, 0, c.width, c.height);
+  greys.set(url, c);
+  return c;
+}

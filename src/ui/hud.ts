@@ -1,8 +1,9 @@
 // The in-race display. Plain DOM over the canvas, shared by all three races.
+// Top row: place and qualifying spots, the commentary booth, the clock.
 
-import { KIND_COLOR, RARITY_COLOR } from '../core/catalog';
+import { cat, KIND_COLOR, RARITY_COLOR } from '../core/catalog';
 import { fmtTime } from '../core/util';
-import { STAGE_EN, STAGE_NAME, STAGES, type Slot, type StageId } from '../game/run';
+import { STAGE_EN, STAGE_NAME, type Slot, type StageId } from '../game/run';
 import type { Hud } from '../stages/stage';
 
 export interface HudView extends Hud {
@@ -14,34 +15,45 @@ export interface HudView extends Hud {
   onMute: () => boolean;
 }
 
+interface Line { text: string; prio: number; who: 'chris' | 'ain' }
+
 export function createHud(root: HTMLElement): HudView {
   const el = document.createElement('div');
   el.className = 'hud';
   el.innerHTML = `
     <div class="hud-hurt" id="h-hurt"></div>
     <div class="hud-top">
-      <div class="hud-legs" id="h-legs"></div>
-      <div class="hud-time"><b id="h-time">0:00.00</b><small id="h-total"></small></div>
+      <div class="hud-rank" id="h-rankbox">
+        <span class="stg" id="h-stage"></span>
+        <b id="h-place">-</b><small id="h-field"></small>
+        <span class="quota" id="h-quota"></span>
+      </div>
+      <div class="hud-cast" id="h-cast">
+        <img id="h-castimg" src="${cat.chars.chrisTalk}" alt="">
+        <p id="h-castline"></p>
+      </div>
       <div class="hud-btns">
+        <div class="hud-time"><b id="h-time">0:00.00</b></div>
         <button id="h-mute" class="ibtn" aria-label="音">♪</button>
         <button id="h-pause" class="ibtn" aria-label="ポーズ">Ⅱ</button>
       </div>
     </div>
-    <div class="hud-prog"><i id="h-prog"></i><span id="h-marks"></span><em id="h-dot"></em></div>
+    <div class="hud-prog"><i id="h-prog"></i><span id="h-marks"></span><span id="h-dots"></span><em id="h-dot"></em></div>
     <div class="hud-vitals">
       <div class="gauge"><i id="h-gauge"></i><span id="h-gtext"></span></div>
       <div class="gauge sub" id="h-subwrap"><i id="h-sub"></i></div>
       <div class="lv"><span id="h-lv">Lv1</span><div class="xp"><i id="h-xp"></i></div></div>
+      <div class="fouls" id="h-fouls"></div>
     </div>
     <div class="hud-boss" id="h-boss"><span id="h-bname"></span><div class="bbar"><i id="h-bbar"></i></div></div>
     <div class="hud-obj" id="h-obj"></div>
     <div class="hud-slots" id="h-slots"></div>
     <div class="hud-banner" id="h-banner"><b></b><small></small></div>
+    <div class="hud-cutin" id="h-cutin"><img alt=""><div><small>PASSIVE SKILL</small><b></b><p></p></div></div>
     <div class="hud-pen" id="h-pen"></div>`;
   root.appendChild(el);
   const $ = <T extends HTMLElement = HTMLElement>(id: string) => el.querySelector<T>(`#${id}`)!;
   const time = $('h-time');
-  const total = $('h-total');
   const gauge = $('h-gauge');
   const gtext = $('h-gtext');
   const sub = $('h-sub');
@@ -49,6 +61,7 @@ export function createHud(root: HTMLElement): HudView {
   const prog = $('h-prog');
   const dot = $('h-dot');
   const marks = $('h-marks');
+  const dotsEl = $('h-dots');
   const lv = $('h-lv');
   const xp = $('h-xp');
   const boss = $('h-boss');
@@ -59,8 +72,17 @@ export function createHud(root: HTMLElement): HudView {
   const banner = $('h-banner');
   const pen = $('h-pen');
   const hurt = $('h-hurt');
-  const legs = $('h-legs');
   const mute = $('h-mute');
+  const place = $('h-place');
+  const field = $('h-field');
+  const quota = $('h-quota');
+  const rankbox = $('h-rankbox');
+  const stageEl = $('h-stage');
+  const foulsEl = $('h-fouls');
+  const cast = $('h-cast');
+  const castImg = $<HTMLImageElement>('h-castimg');
+  const castLine = $('h-castline');
+  const cutin = $('h-cutin');
 
   let lastG = -1;
   let lastGT = '';
@@ -72,36 +94,72 @@ export function createHud(root: HTMLElement): HudView {
   let lastBF = -1;
   let lastObj = '';
   let lastMarks = '';
+  let lastRank = '';
+  let lastFoul = '';
   let bannerT = 0;
-  let stageNow: StageId = 'land';
+  let cutT = 0;
+  let dotEls: HTMLElement[] = [];
+  let dotsAt = 0;
+
+  // the commentary booth: one line at a time, important lines jump the queue
+  const queue: Line[] = [];
+  let showing: Line | null = null;
+  let shownAt = 0;
+  const pump = () => {
+    const now = performance.now();
+    if (showing && now - shownAt < (queue.length && queue[0].prio > showing.prio ? 700 : 1900)) return;
+    const next = queue.shift();
+    if (!next) {
+      if (showing && now - shownAt > 4200) {
+        showing = null;
+        cast.classList.remove('on');
+      }
+      return;
+    }
+    showing = next;
+    shownAt = now;
+    castImg.src = next.who === 'ain' ? cat.chars.ainTalk : cat.chars.chrisTalk;
+    castLine.textContent = next.text;
+    cast.dataset.who = next.who;
+    cast.dataset.prio = String(next.prio);
+    cast.classList.remove('pop');
+    void cast.offsetWidth;
+    cast.classList.add('on', 'pop');
+  };
+  window.setInterval(pump, 200);
 
   const api: HudView = {
     el,
     onPause: () => undefined,
     onMute: () => false,
-    show(stage, splits) {
-      stageNow = stage;
+    show(stage) {
       el.classList.add('on');
       el.dataset.stage = stage;
-      legs.innerHTML = STAGES.map((s, i) => {
-        const done = splits[i] !== undefined;
-        const cls = s === stage ? 'now' : done ? 'done' : '';
-        return `<span class="leg ${cls}"><b>${STAGE_NAME[s]}</b>${done ? `<small>${fmtTime(splits[i])}</small>` : s === stage ? `<small>${STAGE_EN[s]}</small>` : ''}</span>`;
-      }).join('');
+      stageEl.textContent = `${STAGE_NAME[stage]} ${STAGE_EN[stage]}`;
       lastG = lastS = lastP = lastXp = lastBF = -3;
-      lastGT = lastObj = lastMarks = '';
+      lastGT = lastObj = lastMarks = lastRank = lastFoul = '';
       lastBoss = '';
       lastLv = 0;
       boss.classList.remove('on');
       banner.classList.remove('on');
+      cutin.classList.remove('on');
+      rankbox.classList.remove('race');
+      place.textContent = '';
+      field.textContent = '';
+      quota.textContent = '';
+      foulsEl.innerHTML = '';
+      dotsEl.innerHTML = '';
+      dotEls = [];
+      queue.length = 0;
+      showing = null;
+      cast.classList.remove('on');
       gauge.parentElement!.dataset.kind = stage === 'sea' ? 'o2' : stage === 'sky' ? 'shield' : 'hp';
     },
     hide() {
       el.classList.remove('on');
     },
-    clock(st, tot) {
+    clock(st) {
       time.textContent = fmtTime(st);
-      total.textContent = stageNow === 'land' ? '' : `TOTAL ${fmtTime(tot)}`;
     },
     gauge(frac, text) {
       const f = Math.round(frac * 200) / 200;
@@ -136,6 +194,39 @@ export function createHud(root: HTMLElement): HudView {
         marks.innerHTML = ms.map((m) => `<u style="left:${m * 100}%"></u>`).join('');
       }
     },
+    dots(all) {
+      const now = performance.now();
+      if (now - dotsAt < 180) return;
+      dotsAt = now;
+      if (dotEls.length !== all.length) {
+        dotsEl.innerHTML = all.map(() => '<s></s>').join('');
+        dotEls = Array.from(dotsEl.querySelectorAll<HTMLElement>('s'));
+      }
+      for (let i = 0; i < all.length; i++) dotEls[i].style.left = `${Math.min(1, all[i]) * 100}%`;
+    },
+    rank(p, total, passed, q) {
+      const key = `${p}/${total}/${passed}/${q}`;
+      if (key === lastRank) return;
+      const was = Number(lastRank.split('/')[0]) || p;
+      lastRank = key;
+      rankbox.classList.add('race');
+      place.textContent = String(p);
+      field.textContent = `位 / ${total}`;
+      quota.textContent = `通過 ${passed}/${q}`;
+      rankbox.classList.toggle('safe', p <= q);
+      quota.classList.toggle('tight', q - passed <= 5);
+      if (p !== was) {
+        rankbox.classList.remove('up', 'down');
+        void rankbox.offsetWidth;
+        rankbox.classList.add(p < was ? 'up' : 'down');
+      }
+    },
+    fouls(n, limit) {
+      const key = `${n}/${limit}`;
+      if (key === lastFoul) return;
+      lastFoul = key;
+      foulsEl.innerHTML = `<span>反則</span>${Array.from({ length: limit }, (_, i) => `<i class="${i < n ? 'on' : ''}"></i>`).join('')}`;
+    },
     level(level, frac) {
       if (level !== lastLv) {
         lastLv = level;
@@ -163,7 +254,7 @@ export function createHud(root: HTMLElement): HudView {
         if (name) bname.textContent = name;
       }
       if (name) {
-        const f = Math.round(Math.max(0, frac) * 200) / 200;
+        const f = Math.round(Math.max(0, Math.min(1, frac)) * 200) / 200;
         if (f !== lastBF) {
           lastBF = f;
           bbar.style.transform = `scaleX(${f})`;
@@ -198,6 +289,27 @@ export function createHud(root: HTMLElement): HudView {
       pen.classList.remove('on');
       void pen.offsetWidth;
       pen.classList.add('on');
+    },
+    say(text, prio = 1, who = 'chris') {
+      // chatter is dropped when the booth is busy; big moments always get through
+      if (prio <= 1 && queue.length >= 2) return;
+      if (queue.some((l) => l.text === text)) return;
+      const line = { text, prio, who };
+      const at = queue.findIndex((l) => l.prio < prio);
+      if (at < 0) queue.push(line);
+      else queue.splice(at, 0, line);
+      if (queue.length > 5) queue.length = 5;
+      pump();
+    },
+    cutin(image, name, text) {
+      cutin.querySelector('img')!.src = image;
+      cutin.querySelector('b')!.textContent = name;
+      cutin.querySelector('p')!.textContent = text;
+      cutin.classList.remove('on');
+      void cutin.offsetWidth;
+      cutin.classList.add('on');
+      window.clearTimeout(cutT);
+      cutT = window.setTimeout(() => cutin.classList.remove('on'), 2300);
     },
   };
   $('h-pause').addEventListener('click', () => api.onPause());

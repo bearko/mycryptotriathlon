@@ -2,9 +2,16 @@ import raw from '../generated/catalog.json';
 import { clamp } from './util';
 
 export type Kind = 'slash' | 'shot' | 'magic' | 'orbit' | 'beast' | 'aura' | 'armor';
+export interface PassiveFx { t: 'revive' | 'dmg' | 'heal' | 'sleep' | 'barrier' | 'decoy' | 'buff' | 'debuff'; v: number; stat?: 'phy' | 'int' | 'agi'; all?: boolean }
+export interface Passive {
+  name: string;
+  /** When it fires: at the start, under an HP line, on being hit, after attacking, on going down, or now and then. */
+  trig: 'start' | 'hp' | 'hurt' | 'skill' | 'death' | 'tick';
+  pct: number; rate: number; once: boolean; text: string; fx: PassiveFx[];
+}
 export interface Hero {
   id: number; name: string; rarity: number; faction: string;
-  hp: number; phy: number; int: number; agi: number; passive: string; img: string;
+  hp: number; phy: number; int: number; agi: number; passive: Passive | null; img: string;
 }
 export interface Ext {
   id: number; name: string; series: number; seriesName: string; rarity: number;

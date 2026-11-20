@@ -2,13 +2,13 @@
 
 import { cat, type Ext, type Hero, type Kind, traitsOf, type Traits } from '../core/catalog';
 import { makeRng, pick, type Rng } from '../core/util';
+import { stats } from './meta';
 
 export const STAGES = ['land', 'sea', 'sky'] as const;
 export type StageId = (typeof STAGES)[number];
 export const STAGE_NAME: Record<StageId, string> = { land: '陸', sea: '海', sky: '空' };
 export const STAGE_EN: Record<StageId, string> = { land: 'LAND', sea: 'SEA', sky: 'SKY' };
 
-export const MAX_SLOTS = 6;
 export const MAX_LV = 5;
 /** Seconds added to the clock when a hero goes down (there is no game over). */
 export const DOWN_PENALTY = 8;
@@ -34,7 +34,7 @@ export interface Run {
 
 export const xpNeed = (level: number) => 10 + level * 12;
 /** Damage bonus from the team level. */
-export const levelMul = (level: number) => 1 + (level - 1) * 0.05;
+export const levelMul = (level: number) => (1 + (level - 1) * (0.05 + stats().awake)) * stats().dmg;
 
 /** Picks the series that appear on the course: at least one of every kind, a few doubled up. */
 function buildPool(rng: Rng): Ext[][] {
@@ -46,7 +46,13 @@ function buildPool(rng: Rng): Ext[][] {
     m.get(e.series)!.push(e);
   }
   const pool: Ext[][] = [];
-  const kinds: Kind[] = ['slash', 'shot', 'magic', 'orbit', 'beast', 'aura', 'armor'];
+  // Kinds beyond the first three are opened in the skill tree: the course itself changes as the tree grows.
+  const st = stats();
+  const kinds: Kind[] = ['slash', 'shot', 'armor'];
+  if (st.kMagic) kinds.push('magic');
+  if (st.kOrbit) kinds.push('orbit');
+  if (st.kBeast) kinds.push('beast');
+  if (st.kAura) kinds.push('aura');
   for (const k of kinds) {
     const series = [...byKind.get(k)!.values()].filter((s) => s.length >= 5);
     const first = pick(rng, series);
@@ -70,13 +76,22 @@ export function newRun(heroes: [Hero, Hero, Hero], seed = COURSE_SEED): Run {
   const want: Kind = t.int > t.phy ? 'magic' : t.agi > t.phy ? 'shot' : 'slash';
   const series = run.pool.find((s) => s[0].kind === want) ?? run.pool[0];
   const starter = series.find((e) => e.rarity === 1) ?? series[0];
-  run.slots.push({ ext: starter, lv: 1 });
+  const st = stats();
+  run.slots.push({ ext: starter, lv: Math.min(MAX_LV, st.startLv) });
+  for (let i = 0; i < st.startExtra; i++) {
+    const more = run.pool.filter((s) => !run.slots.some((x) => x.ext.series === s[0].series) && s[0].kind !== 'armor');
+    if (!more.length) break;
+    const s2 = pick(rng, more);
+    run.slots.push({ ext: s2.find((e) => e.rarity === 1) ?? s2[0], lv: 1 });
+  }
   return run;
 }
 
 /** Rolls a piece of gear from the course pool. `luck` 0..1 shifts the rarity upward. */
 export function rollExt(run: Run, rng: Rng, luck: number): Ext {
   const series = pick(rng, run.pool);
+  const st = stats();
+  luck = Math.min(1, luck + st.luck);
   const r = rng();
   const w = [0.5 - luck * 0.38, 0.3 - luck * 0.1, 0.14 + luck * 0.2, 0.05 + luck * 0.18, 0.01 + luck * 0.1];
   let acc = 0;
@@ -89,7 +104,8 @@ export function rollExt(run: Run, rng: Rng, luck: number): Ext {
     }
     rarity = 5;
   }
-  return series.find((e) => e.rarity === rarity) ?? series[series.length - 1];
+  rarity = Math.min(rarity, st.maxRarity);
+  return series.find((e) => e.rarity === rarity) ?? series.find((e) => e.rarity <= rarity) ?? series[0];
 }
 
 export interface Gain { slot: Slot; kind: 'new' | 'up' | 'max'; }
@@ -108,8 +124,8 @@ export function takeExt(run: Run, ext: Ext): Gain {
     }
     return { slot: same, kind: 'max' };
   }
-  if (run.slots.length < MAX_SLOTS) {
-    const slot = { ext, lv: 1 };
+  if (run.slots.length < stats().slots) {
+    const slot = { ext, lv: Math.random() < stats().gearLv2 ? 2 : 1 };
     run.slots.push(slot);
     return { slot, kind: 'new' };
   }
