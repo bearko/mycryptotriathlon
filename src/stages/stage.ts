@@ -13,6 +13,8 @@ export interface Hud {
   banner(text: string, sub?: string, tone?: 'warn' | 'good'): void;
   hurt(): void;
   penalty(sec: number): void;
+  /** The player knocked something out: a run of these counts up on screen. */
+  ko(): void;
   /** One line from the commentary booth. Higher priority lines push ahead of chatter. */
   say(text: string, prio?: number, who?: 'chris' | 'ain'): void;
   /** Place in the race, and how many of the qualifying spots are taken. */

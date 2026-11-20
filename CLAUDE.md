@@ -8,7 +8,7 @@
   - `src/core/` 入力（キーボード・マウス・タッチ）、音、画像、カタログ、乱数
   - `src/game/` ルール：`roster.ts`（武器 10 種・強化 11 種・お助けエクステンションの一覧と数値）、`run.ts`（1 回の挑戦・レベルアップのカード・経験と GUM）、`tuning.ts`（空の機体：売却・改造ランク・武装）、`meta.ts`（スキルツリー・メダル・セーブ）、`reward.ts`（CE）
   - `src/stages/` レース：`arena.ts`（2D の共通部分：走者・エネミー・気絶・反則・審判・パッシブ）、`weapons.ts`（武器の動き）、`land.ts`、`sea.ts`、`sky.ts`（three.js。ここだけ別チャンク）
-  - `src/ui/` 画面：`hud.ts`（順位・実況・ゲージ）、`screens.ts`（タイトル・走順・結果など）、`tree.ts`（スキルツリー）
+  - `src/ui/` 画面：`hud.ts`（順位・実況・ゲージ）、`screens.ts`（タイトル・走順・結果など）、`tree.ts`（スキルツリー）、`fx.ts`（画面切り替えと演出）
 - 素材は `vendor/mycryptoheroes`（サブモジュール）から `scripts/sync-assets.mjs` が使うものだけを `public/mch/` に写し、`src/generated/catalog.json` を作る（どちらも Git には入れない）。ヒーローのパッシブスキルの読み取り（発動条件と効果の種類）もここ。
 - レースがツリーから読むのは `stats()`（`meta.ts` の `Stats`）だけ。パネルを足すときは `SKILLS` に 1 行足し、必要なら `Stats` にキーを足して、レース側でそのキーを読む。置き場所（x, y）が重ならないこと・根からたどれることはテストが見る。
 - 反則は「審判の円の中で、ライバルに直接攻撃を当てたとき」だけ（`arena.ts` の `strike`・`watching`・`foul`）。体当たり・アイテム・パッシブは反則にしない。
@@ -22,3 +22,4 @@
 - 海は 30 組・先着 10 組（`sea.ts`）。門は走者ごと（`Runner.gate`）で、その深さの遺物を自分で掘ると通れる。ライバルの道順は `plan`、動きは `rivalAI`（画面の外は壁もエネミーも見ない簡略版）。難度は `PACE_MIN`・`PACE_SPAN`・`DIG_MIN`・`DIG_SPAN`。
 - 空の機体は `src/game/tuning.ts`（売却・ランクの値段・武装・`tuneStats`）と `screens.ts` の `tuneScreen`。空のレースが読むのは `tuneStats(run)` だけで、陸・海のエクステンション（`run.slots`）は空では使わない。
 - 空は 10 機のバトルロワイヤル（`sky.ts`）。弾は前（-z）にしか飛ばず、位置取り（`z`）はブーストとブレーキで変える。うしろにいる間はエネルギーが回復しない（`charge`）— 全機がうしろの壁に貼りつくのを防ぐ決まりなので外さない。ライバルは `scan`（ねらう相手）→ `decide`（行きたい場所）→ `rivalAI`。難度は `RIVAL_HP`・`RIVAL_DMG`・`PLAYER_X`（自機の弾がライバルに通る割合）・`RIVAL_X`。`RIVAL_DMG` は 2 変えるだけで勝率が大きく動くので、変えたら自動操縦で 8 回は回す。
+- 見た目の決まりは `docs/GAME_DESIGN.md` の「見た目と手触りの決まり」。スタイルは `src/styles/main.css`（土台）→ `src/styles/show.css`（上書き。新しい見た目はこちらに書く）。画面の切り替え・火花・紙吹雪・背景は `src/ui/fx.ts`（`cover`/`uncover`・`burst`・`confetti`・`ambient`）。`cover()` したら、次に `open()`（または `treeScreen`）で画面を出すこと — それが帯を開ける。新しい画面やボタンを足すときは、現れ方・押したときの音と動きまで付ける。

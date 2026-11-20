@@ -1,10 +1,11 @@
 // Everything outside the races: title, relay line-up, the cards between races, the hangar, the result.
 
-import { sample, sfx, unlockAudio } from '../core/audio';
+import { muffle, sample, sfx, unlockAudio } from '../core/audio';
 import {
   ARM_SLOTS, autoTune, DEFAULT_ARM, gumLeft, openTune, rankCost, rankSpan, rowValue, SKY_ARMS, TUNE_MAX, TUNE_ROWS, tuneRate, type ArmKind, type TuneId,
 } from '../game/tuning';
 import { cat, RARITY_COLOR, traitsOf, type Hero } from '../core/catalog';
+import { ambient, burstAt, chars, confetti, countUp, cover, isCovered, kick, replay, shock, uncover } from './fx';
 import { iconOf, nameOf, type Def } from '../game/roster';
 import { input } from '../core/input';
 import { commit, save } from '../core/save';
@@ -30,6 +31,8 @@ function open(cls: string, html: string): HTMLElement {
   el.innerHTML = html;
   layer.appendChild(el);
   requestAnimationFrame(() => el.classList.add('in'));
+  // a screen that arrives behind the wipe lifts it
+  if (isCovered()) window.setTimeout(uncover, 60);
   return el;
 }
 function close(el: HTMLElement): void {
@@ -61,29 +64,57 @@ const RULES: Record<StageId, { goal: string; pc: string; touch: string }> = {
 // ------------------------------------------------------------------ title
 export function titleScreen(): Promise<void> {
   const s = save();
+  const m = meta();
+  // the parade: a different crowd of heroes runs past every time the title opens
+  const crowd = [...cat.heroes].sort(() => Math.random() - 0.5).slice(0, 14);
+  const runner = (h: Hero, i: number, shade: boolean) => {
+    const d = shade ? 16 + Math.random() * 10 : 7 + Math.random() * 7;
+    return `<i class="tt-run${shade ? ' shade' : ''}" style="--d:${d.toFixed(1)}s;--w:${(-Math.random() * d).toFixed(1)}s;--s:${(shade ? 1.5 + Math.random() * 0.6 : 0.8 + (i % 3) * 0.2).toFixed(2)}"><img src="${h.img}" alt=""></i>`;
+  };
+  const news = [
+    m.runs ? `挑戦 <b>${m.runs}</b> 回` : 'はじめての挑戦、歓迎します',
+    m.bestPlace ? `陸の最高 <b>${m.bestPlace}位</b>` : m.runs ? `陸の最長 <b>${Math.round(m.bestProgress * 100)}%</b>` : '最初は予選を通れなくて当たり前',
+    s.best !== null ? `優勝ベスト <b>${fmtTime(s.best)}</b>` : '走る → 負ける → スキルツリーで強くなる → もう一度',
+    '審判の円の中での直接攻撃は反則',
+    '順位が低いほど、宝箱から強いお助けエクステンションが出る',
+    '空では、弾は前にしか飛ばない',
+    '非公式の二次創作です ／ 素材：My Crypto Heroes',
+  ].join('　◆　');
   const el = open('title', `
-    <div class="title-bg" style="background-image:url(${cat.bg.title})"></div>
-    <div class="title-box">
-      <p class="title-sub">50組が競う 陸・海・空 3種目リレー</p>
-      <h1><span>My</span><span>Crypto</span><span class="tri">Triathlon</span></h1>
-      <div class="title-legs">
-        <span class="l-land"><b>陸</b>50組→30組</span><i>▶</i>
-        <span class="l-sea"><b>海</b>30組→10組</span><i>▶</i>
-        <span class="l-sky"><b>空</b>最後の1組へ</span>
-      </div>
-      <button class="btn big" id="t-start">START</button>
-      <p class="title-best">${meta().runs ? `挑戦 <b>${meta().runs}</b> 回 ／ ${meta().bestPlace ? `陸の最高 <b>${meta().bestPlace}位</b>` : `陸の最長 <b>${Math.round(meta().bestProgress * 100)}%</b>`}${s.best !== null ? ` ／ 優勝ベスト <b>${fmtTime(s.best)}</b>` : ''}` : 'はじめての挑戦'}</p>
-      <button class="btn ghost small" id="t-about">このゲームについて</button>
+    ${ambient('MY CRYPTO TRIATHLON ● LAND ● SEA ● SKY')}
+    <div class="tt-track">${crowd.slice(0, 5).map((h, i) => runner(h, i, true)).join('')}${crowd.slice(5).map((h, i) => runner(h, i, false)).join('')}</div>
+    <div class="tt-logo">
+      <p class="tt-kicker"><span>50 TEAMS</span><span>3 RACES</span><span>1 CHAMPION</span></p>
+      <h1><span class="tt-my">${chars('MY CRYPTO')}</span><span class="tt-tri">${chars('TRIATHLON')}</span></h1>
+      <p class="tt-jp">陸・海・空 3種目リレー</p>
     </div>
     <img class="title-chris" src="${cat.chars.chrisCheer}" alt="">
-    <p class="title-foot">非公式の二次創作です ／ 素材：My Crypto Heroes</p>`);
+    <div class="tt-side">
+      <div class="tt-leg land"><b>陸</b><span>LAND</span><em>50 ▶ 30組</em></div>
+      <div class="tt-leg sea"><b>海</b><span>SEA</span><em>30 ▶ 10組</em></div>
+      <div class="tt-leg sky"><b>空</b><span>SKY</span><em>最後の1組</em></div>
+      <div class="tt-cta"><button class="btn big" id="t-start">START</button><p class="tt-any">TAP ／ PRESS ANY KEY</p></div>
+    </div>
+    <button class="btn ghost small" id="t-about">このゲームについて</button>
+    <div class="tt-ticker"><span>${news}</span><span>${news}</span></div>`);
   return new Promise((res) => {
-    el.querySelector('#t-start')!.addEventListener('click', () => {
+    let gone = false;
+    const start = async () => {
+      if (gone || document.querySelector('.screen.modal')) return;
+      gone = true;
+      window.removeEventListener('keydown', onKey);
       unlockAudio();
-      sfx('ui');
+      sfx('select');
+      burstAt(el.querySelector('#t-start')!, 22, 160);
+      await cover();
       close(el);
       res();
-    });
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === 'Space' || e.code === 'Enter') void start();
+    };
+    window.addEventListener('keydown', onKey);
+    el.querySelector('#t-start')!.addEventListener('click', () => void start());
     el.querySelector('#t-about')!.addEventListener('click', () => {
       unlockAudio();
       sfx('ui');
@@ -130,7 +161,8 @@ export function selectScreen(): Promise<[Hero, Hero, Hero]> {
   let hand = draft(10);
   const chosen: (Hero | null)[] = [null, null, null];
   const el = open('select', `
-    <header><h2>リレーの走順を決める</h2><p>ヒーローをタップして、陸 → 海 → 空 の順に並べる</p></header>
+    ${ambient('RELAY ENTRY ● 走順を決める')}
+    <header><h2 data-k="ENTRY">リレーの走順を決める</h2><p>ヒーローをタップして、陸 → 海 → 空 の順に並べる</p></header>
     <div class="relay" id="s-relay"></div>
     <div class="hand" id="s-hand"></div>
     <footer>
@@ -146,15 +178,16 @@ export function selectScreen(): Promise<[Hero, Hero, Hero]> {
     relay.innerHTML = STAGES.map((st, i) => {
       const h = chosen[i];
       const t = h ? traitsOf(h) : null;
-      return `<button class="leg-slot ${st}${h ? ' set' : ''}" data-i="${i}">
+      return `<button class="leg-slot ${st}${h ? ' set' : ''}${i === justSet ? ' pop' : ''}" data-i="${i}">
+        <i class="wm">${STAGE_NAME[st]}</i>
         <span class="tag"><b>${STAGE_NAME[st]}</b>${STAGE_EN[st]}</span>
-        ${h ? `<img src="${h.img}" alt=""><span class="nm">${h.name}</span><span class="st">${stars(t![st])}</span>` : '<span class="empty">？</span>'}
+        ${h ? `<img src="${h.img}" alt=""><span class="nm">${h.name}</span><span class="st">${stars(t![st])}</span>` : '<span class="empty">SELECT</span>'}
       </button>`;
     }).join('<i class="arrow">▶</i>');
     handEl.innerHTML = hand.map((h, i) => {
       const t = traitsOf(h);
       const used = chosen.includes(h);
-      return `<button class="card${used ? ' used' : ''}" data-i="${i}" style="--rar:${RARITY_COLOR[h.rarity]}">
+      return `<button class="card${used ? ' used' : ''}" data-i="${i}" style="--rar:${RARITY_COLOR[h.rarity]};--n:${dealt ? i : -1}">
         <img src="${h.img}" alt="">
         <span class="nm">${h.name}</span>
         <span class="apt"><em class="land">陸</em>${stars(t.land)}</span>
@@ -163,7 +196,16 @@ export function selectScreen(): Promise<[Hero, Hero, Hero]> {
       </button>`;
     }).join('');
     go.disabled = chosen.some((c) => !c);
+    if (justSet >= 0) {
+      const slot = relay.querySelectorAll('.leg-slot')[justSet];
+      if (slot) burstAt(slot, 12, 90);
+    }
+    justSet = -1;
+    dealt = false;
   };
+  /** The slot that was just filled (it pops), and whether the hand is being dealt afresh. */
+  let justSet = -1;
+  let dealt = true;
   paint();
 
   handEl.addEventListener('click', (e) => {
@@ -179,7 +221,8 @@ export function selectScreen(): Promise<[Hero, Hero, Hero]> {
       const free = chosen.indexOf(null);
       if (free < 0) return;
       chosen[free] = h;
-      sfx('ui');
+      justSet = free;
+      sfx('stamp');
     }
     paint();
   });
@@ -197,7 +240,8 @@ export function selectScreen(): Promise<[Hero, Hero, Hero]> {
     unlockAudio();
     hand = draft(10);
     chosen.fill(null);
-    sfx('ui');
+    dealt = true;
+    sfx('deal');
     paint();
   });
   el.querySelector('#s-auto')!.addEventListener('click', () => {
@@ -207,13 +251,16 @@ export function selectScreen(): Promise<[Hero, Hero, Hero]> {
       left.sort((a, b) => traitsOf(b)[st] - traitsOf(a)[st]);
       chosen[i] = left.shift()!;
     });
-    sfx('ui');
+    sfx('stamp');
     paint();
+    relay.querySelectorAll('.leg-slot').forEach((sl) => replay(sl, 'pop'));
   });
   return new Promise((res) => {
-    go.addEventListener('click', () => {
+    go.addEventListener('click', async () => {
       unlockAudio();
-      sfx('go');
+      sfx('select');
+      burstAt(go, 20, 150);
+      await cover();
       close(el);
       res(chosen as [Hero, Hero, Hero]);
     });
@@ -226,15 +273,18 @@ export async function introCard(stage: StageId, index: number, run: Run, quick: 
   const h = run.heroes[index];
   const r = RULES[stage];
   const el = open(`intro ${stage}`, `
-    <div class="intro-band">
-      <p class="leg-no">${['第1走', '第2走', '第3走'][index]}</p>
-      <h2><b>${STAGE_NAME[stage]}</b><span>${STAGE_EN[stage]}</span></h2>
-      <div class="runner"><img src="${h.img}" alt=""><span>${h.name}</span></div>
-      <p class="goal">${r.goal}</p>
-      <p class="keys">${input.touch ? r.touch : r.pc}</p>
-      <p class="tap">タップ / Space でスタート</p>
+    <div class="in-tint"></div>
+    <i class="in-kanji">${STAGE_NAME[stage]}</i>
+    <div class="in-runner"><img src="${h.img}" alt=""><p><small>RUNNER</small>${h.name}</p></div>
+    <div class="in-body">
+      <p class="in-leg"><span>ROUND ${index + 1}</span><span>${['第1走', '第2走', '第3走'][index]}</span></p>
+      <h2>${STAGE_EN[stage]}</h2>
+      <p class="in-goal">${r.goal}</p>
+      <p class="in-keys">${(input.touch ? r.touch : r.pc).split(' ／ ').join('<br>')}</p>
     </div>
+    <p class="tap">TAP ／ SPACE でスタート</p>
     <div class="count" id="i-count"></div>`);
+  if (!quick) sfx('stamp');
   if (!quick) {
     await new Promise<void>((res) => {
       let done = false;
@@ -253,6 +303,7 @@ export async function introCard(stage: StageId, index: number, run: Run, quick: 
     });
   }
   unlockAudio();
+  if (!quick) sfx('whoosh');
   el.classList.add('counting');
   const count = el.querySelector<HTMLElement>('#i-count')!;
   for (const n of quick ? [] : ['3', '2', '1']) {
@@ -261,6 +312,7 @@ export async function introCard(stage: StageId, index: number, run: Run, quick: 
     void count.offsetWidth;
     count.classList.add('tick');
     sfx('count');
+    kick(5);
     await wait(430);
   }
   count.textContent = 'GO!';
@@ -268,6 +320,10 @@ export async function introCard(stage: StageId, index: number, run: Run, quick: 
   void count.offsetWidth;
   count.classList.add('tick', 'go');
   sfx('go');
+  if (!quick) {
+    kick(12);
+    shock(window.innerWidth / 2, window.innerHeight / 2, '#d8ff3a');
+  }
   window.setTimeout(() => close(el), 350);
 }
 
@@ -391,6 +447,7 @@ export function tuneScreen(run: Run, quick: boolean): Promise<number> {
         </div>
       </div>`;
     }).join('');
+    window.setTimeout(() => rowsEl.parentElement!.classList.add('painted'), 600);
     armsEl.innerHTML = `<div class="tn-arm std"><img src="${DEFAULT_ARM.img}" alt=""><span><b>${DEFAULT_ARM.name}</b><small>${DEFAULT_ARM.desc}</small></span><em>標準</em></div>` +
       SKY_ARMS.map((a) => {
         const on = t.arms.includes(a.id);
@@ -524,6 +581,13 @@ export function resultScreen(run: Run, pay?: Payout): Promise<After> {
   }
   commit();
   sample('win', 0.6);
+  sfx('fanfare');
+  confetti(160);
+  window.setTimeout(() => {
+    sfx('slam');
+    kick(14);
+    confetti(120);
+  }, 480);
   const rows = STAGES.map((st, i) => {
     const d = prevSplits ? run.splits[i] - prevSplits[i] : null;
     return `<li class="${st}">
@@ -534,6 +598,7 @@ export function resultScreen(run: Run, pay?: Payout): Promise<After> {
     </li>`;
   }).join('');
   const el = open('result', `
+    ${ambient('CHAMPION ● MY CRYPTO TRIATHLON ● WINNER', 'sky')}
     <div class="result-box">
       <p class="fin">CHAMPION ― 3 種目を制した</p>
       ${record ? `<p class="record">${prev === null ? '初優勝！' : '自己ベスト更新！'}</p>` : ''}
@@ -549,8 +614,9 @@ export function resultScreen(run: Run, pay?: Payout): Promise<After> {
     </div>
     <img class="result-chris" src="${record ? cat.chars.chrisGuts : cat.chars.chrisIdle}" alt="">`);
   return new Promise((res) => {
-    el.querySelector('#r-retry')!.addEventListener('click', () => {
-      sfx('go');
+    el.querySelector('#r-retry')!.addEventListener('click', async () => {
+      sfx('select');
+      await cover();
       close(el);
       res('retry');
     });
@@ -559,6 +625,7 @@ export function resultScreen(run: Run, pay?: Payout): Promise<After> {
 
 // ------------------------------------------------------------------ pause
 export function pauseScreen(): Promise<'resume' | 'restart' | 'quit'> {
+  muffle(true);
   const el = open('modal', `
     <div class="panel pause">
       <h2>PAUSE</h2>
@@ -574,6 +641,7 @@ export function pauseScreen(): Promise<'resume' | 'restart' | 'quit'> {
     const fin = (a: 'resume' | 'restart' | 'quit') => {
       window.removeEventListener('keydown', onKey);
       sfx(a === 'resume' ? 'ui' : 'uiBack');
+      muffle(false);
       close(el);
       res(a);
     };
@@ -589,27 +657,46 @@ export function pauseScreen(): Promise<'resume' | 'restart' | 'quit'> {
 /** Cut off before the goal (or outside the qualifying places). Shows how far it went and what it earned. */
 export function outScreen(stage: StageId, res: StageResult, pay: Payout): Promise<void> {
   sample('lose', 0.5);
+  sfx('sad');
+  window.setTimeout(() => {
+    sfx('stamp');
+    kick(8);
+  }, 330);
   const m = meta();
   const left = Math.round((1 - res.progress) * 3000);
   const el = open(`outrace ${stage}`, `
+    ${ambient(`${STAGE_EN[stage]} ● ${stage === 'sky' ? 'SHOT DOWN' : 'OUT OF THE RACE'} ● TRY AGAIN`, stage)}
     <div class="out-box">
+      <div class="out-l">
       <p class="fin">${STAGE_NAME[stage]}・${stage === 'sky' ? '決勝' : '予選'}</p>
       <h2>${res.progress >= 1 ? '通過ならず…' : stage === 'sky' ? '撃墜された…' : stage === 'sea' ? '秘宝が尽きた！' : '時間切れ！'}</h2>
       <p class="place"><b>${res.place}</b>位 <small>/ ${res.field}組（${stage === 'sky' ? '優勝は 1 組だけ' : `通過は ${res.quota}位まで`}）</small></p>
       <div class="howfar"><i style="width:${res.progress * 100}%"></i>${stage === 'land' ? `<u style="left:${m.bestProgress * 100}%"></u>` : ''}</div>
       <p class="left">${res.progress >= 1 ? 'ゴールはできた。あとは順位だ' : stage === 'sky' ? (res.place === 2 ? 'あと1機だった！' : `優勝まで あと ${res.place - 1}機`) : stage === 'sea' ? (res.progress > 0.9 ? '秘宝まで、あと一歩だった' : `最深部まで あと ${Math.round((1 - res.progress) * 420)}m`) : `ゴールまで あと ${left}m`}</p>
-      <ul class="pay">${pay.lines.map((l) => `<li><span>${l.label}</span><b>+${l.ce}</b></li>`).join('')}
-        ${pay.mult !== 1 ? `<li class="mul"><span>賞金アップ</span><b>×${pay.mult.toFixed(2)}</b></li>` : ''}
-        <li class="sum"><span><img src="${cat.icons.ce}" alt=""> 獲得 CE</span><b>+${pay.total}</b></li>
+      </div>
+      <div class="out-r">
+      <ul class="pay">${pay.lines.map((l, i) => `<li style="--n:${i}"><span>${l.label}</span><b>+${l.ce}</b></li>`).join('')}
+        ${pay.mult !== 1 ? `<li class="mul" style="--n:${pay.lines.length}"><span>賞金アップ</span><b>×${pay.mult.toFixed(2)}</b></li>` : ''}
+        <li class="sum" style="--n:${pay.lines.length + 1}"><span><img src="${cat.icons.ce}" alt=""> 獲得 CE</span><b id="o-sum">+0</b></li>
       </ul>
       ${pay.feats.length ? `<p class="newfeat">🏅 メダル獲得：${pay.feats.map((f) => f.name).join('、')}</p>` : ''}
       <p class="hint">CE でスキルツリーを育てて、もう一度。</p>
       <button class="btn big" id="o-go">スキルツリーへ</button>
+      </div>
     </div>
-    <img class="result-chris" src="${cat.chars.chrisCry}" alt="">`);
+    <img class="result-chris out-chris" src="${cat.chars.chrisCry}" alt="">`);
+  // the prize counts up after the lines have come in, and lands with a coin
+  const sum = el.querySelector<HTMLElement>('#o-sum')!;
+  window.setTimeout(() => {
+    void countUp(sum, pay.total, 700, (n) => `+${n}`).then(() => {
+      sfx('coin');
+      burstAt(sum, 12, 70, ['#d8ff3a', '#ffe45c', '#ffffff']);
+    });
+  }, 900 + pay.lines.length * 70);
   return new Promise((r) => {
-    el.querySelector('#o-go')!.addEventListener('click', () => {
-      sfx('ui');
+    el.querySelector('#o-go')!.addEventListener('click', async () => {
+      sfx('select');
+      await cover();
       close(el);
       r();
     });
@@ -622,6 +709,13 @@ export function outScreen(stage: StageId, res: StageResult, pay: Payout): Promis
 export function goalScreen(stage: StageId, index: number, run: Run, res: StageResult, time: number): Promise<void> {
   sample('win', 0.5);
   const next = index < 2 ? run.heroes[index + 1] : null;
+  sfx('slam');
+  window.setTimeout(() => {
+    kick(14);
+    shock(window.innerWidth / 2, window.innerHeight * 0.36);
+    confetti(res.place <= 3 ? 120 : 60);
+    sfx(res.place <= 3 ? 'fanfare' : 'rankUp');
+  }, 420);
   const el = open(`goal ${stage}`, `
     <div class="goal-top">
       <p class="goal-fin">GOAL!</p>
@@ -636,8 +730,9 @@ export function goalScreen(stage: StageId, index: number, run: Run, res: StageRe
     const btn = el.querySelector<HTMLButtonElement>('#g-next')!;
     // the button wakes a moment later, so a press meant for the race does not skip the finish
     window.setTimeout(() => (btn.disabled = false), 1200);
-    btn.addEventListener('click', () => {
-      sfx('ui');
+    btn.addEventListener('click', async () => {
+      sfx('select');
+      await cover();
       close(el);
       r();
     });
@@ -657,18 +752,20 @@ export function levelUpScreen(run: Run, auto: boolean): Promise<void> {
     return Promise.resolve();
   }
   sample('chest', 0.5);
+  sfx('levelup');
+  muffle(true);
   const el = open('levelup', '<div class="lu-box"><p class="lu-head"></p><div class="lu-cards"></div><p class="lu-wait">ボタンから手をはなすと選べます</p><div class="lu-foot"></div></div>');
   const head = el.querySelector<HTMLElement>('.lu-head')!;
   const box = el.querySelector<HTMLElement>('.lu-cards')!;
   const foot = el.querySelector<HTMLElement>('.lu-foot')!;
   const max = maxLvOf();
   const paint = () => {
-    head.innerHTML = `<b>LEVEL UP!</b> チーム Lv${run.level}　エクステンションを 1 つ選ぶ`;
+    head.innerHTML = `<b>${chars('LEVEL UP!')}</b><span>チーム Lv${run.level} ／ エクステンションを 1 つ選ぶ</span>`;
     box.innerHTML = cards.map((d: Def, i) => {
       const own = run.slots.find((s) => s.def === d);
       const next = (own?.lv ?? 0) + 1;
       const t = d.tiers[next - 1];
-      return `<button class="lu-card ${d.weapon ? 'weapon' : 'boost'}" data-i="${i}" style="--c:${d.color};--rar:${RARITY_COLOR[next]};animation-delay:${i * 70}ms">
+      return `<button class="lu-card ${d.weapon ? 'weapon' : 'boost'}" data-i="${i}" style="--c:${d.color};--rar:${RARITY_COLOR[next]};--n:${i};animation-delay:${i * 90 + 120}ms">
         <span class="lu-tag">${own ? `Lv${own.lv} → <b>Lv${next}${next >= max ? ' MAX' : ''}</b>` : '<b>NEW</b>'}</span>
         <img src="${iconOf(d, next)}" alt="">
         <span class="lu-name">${nameOf(d, next)}</span>
@@ -689,13 +786,18 @@ export function levelUpScreen(run: Run, auto: boolean): Promise<void> {
       window.removeEventListener('keydown', mash, true);
       takeCard(run, cards[i]);
       run.pending = Math.max(0, run.pending - 1);
-      sfx('levelup');
+      sfx('select');
       sample('buff', 0.5);
-      box.querySelector(`[data-i="${i}"]`)?.classList.add('picked');
+      // the chosen card flies up and out; the others fall off the table
+      const chosenEl = box.querySelector(`[data-i="${i}"]`);
+      box.querySelectorAll('.lu-card').forEach((c) => c.classList.add(c === chosenEl ? 'picked' : 'lost'));
+      if (chosenEl) burstAt(chosenEl, 20, 140);
+      kick(6);
       window.setTimeout(() => {
+        muffle(false);
         close(el);
         res();
-      }, 160);
+      }, 330);
     };
     const onKey = (e: KeyboardEvent) => {
       const i = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(e.code);
@@ -711,6 +813,7 @@ export function levelUpScreen(run: Run, auto: boolean): Promise<void> {
       timer = window.setTimeout(() => {
         armed = true;
         el.classList.add('armed');
+        sfx('armed');
       }, ms);
     };
     const mash = (e: Event) => {

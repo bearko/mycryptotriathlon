@@ -3,6 +3,7 @@
 
 import { sample, sfx, unlockAudio } from '../core/audio';
 import { cat } from '../core/catalog';
+import { ambient, burstAt, countUp, cover, isCovered, kick, replay, uncover } from './fx';
 import {
   BRANCHES, buy, canBuy, costOf, FEATS, isOpen, levelOf, meta, NODE, SKILLS, type SkillNode,
 } from '../game/meta';
@@ -14,13 +15,14 @@ export function treeScreen(layer: HTMLElement): Promise<'race' | 'team'> {
   el.className = 'screen tree';
   el.innerHTML = `
     <div class="tree-stage" id="tr-stage">
+      ${ambient('SKILL TREE ● 走って、負けて、強くなる')}
       <div class="tree-world" id="tr-world"></div>
       <div class="tree-wallet"><span class="ce"><img src="${cat.icons.ce}" alt="">CE <b id="tr-ce"></b></span><span class="medal">🏅 メダル <b id="tr-medal"></b></span></div>
       <div class="tree-zoom"><button class="ibtn" id="tr-in">＋</button><button class="ibtn" id="tr-out">－</button><button class="ibtn" id="tr-fit">⤢</button></div>
       <div class="tree-legend"><i class="new"></i>新しい要素 <i class="risk"></i>試練（難しくなるかわりに報酬）</div>
     </div>
     <aside class="tree-side">
-      <h2>スキルツリー</h2>
+      <h2 data-k="GROW">スキルツリー</h2>
       <div class="tree-detail" id="tr-detail"></div>
       <div class="tree-nav">
         <button class="btn ghost small" id="tr-feats">メダル一覧</button>
@@ -30,6 +32,7 @@ export function treeScreen(layer: HTMLElement): Promise<'race' | 'team'> {
     </aside>`;
   layer.appendChild(el);
   requestAnimationFrame(() => el.classList.add('in'));
+  if (isCovered()) window.setTimeout(uncover, 60);
   const stage = el.querySelector<HTMLElement>('#tr-stage')!;
   const world = el.querySelector<HTMLElement>('#tr-world')!;
   const detail = el.querySelector<HTMLElement>('#tr-detail')!;
@@ -39,6 +42,7 @@ export function treeScreen(layer: HTMLElement): Promise<'race' | 'team'> {
   let zoom = Math.min(1, Math.max(0.55, window.innerHeight / 620));
   let ox = 0;
   let oy = 0;
+  let shownCe = -1;
   let picked: SkillNode = SKILLS.find((n) => canBuy(n)) ?? NODE.get('root')!;
 
   /** Shown when open, or when it is the next step after something open (as a silhouette). */
@@ -50,7 +54,14 @@ export function treeScreen(layer: HTMLElement): Promise<'race' | 'team'> {
 
   const paint = () => {
     const m = meta();
-    ceEl.textContent = String(Math.floor(m.ce));
+    const ce = Math.floor(m.ce);
+    // the wallet rolls to its new figure when something is bought
+    if (shownCe >= 0 && ce !== shownCe) {
+      const from = shownCe;
+      void countUp(ceEl, from - ce, 380, (n) => String(from - n));
+      replay(ceEl.parentElement!, 'spend');
+    } else ceEl.textContent = String(ce);
+    shownCe = ce;
     medalEl.textContent = String(m.medal);
     let lines = '';
     let nodes = '';
@@ -101,11 +112,14 @@ export function treeScreen(layer: HTMLElement): Promise<'race' | 'team'> {
       sfx('hit');
       return;
     }
-    sfx('levelup');
+    sfx('stamp');
+    sfx('armed');
     sample('buff', 0.5);
     paint();
     const node = world.querySelector<HTMLElement>(`[data-id="${picked.id}"]`);
     node?.classList.add('bought');
+    if (node) burstAt(node, 18, 120);
+    kick(5);
   };
 
   // pan and zoom
@@ -153,6 +167,7 @@ export function treeScreen(layer: HTMLElement): Promise<'race' | 'team'> {
       picked = n;
       sfx('ui');
       paint();
+      replay(detail, 'swap');
     }
   };
   stage.addEventListener('pointerup', up);
@@ -202,13 +217,15 @@ export function treeScreen(layer: HTMLElement): Promise<'race' | 'team'> {
       window.setTimeout(() => el.remove(), 220);
       res(r);
     };
-    el.querySelector('#tr-race')!.addEventListener('click', () => {
+    el.querySelector('#tr-race')!.addEventListener('click', async () => {
       unlockAudio();
-      sfx('go');
+      sfx('select');
+      await cover();
       done('race');
     });
-    el.querySelector('#tr-team')!.addEventListener('click', () => {
+    el.querySelector('#tr-team')!.addEventListener('click', async () => {
       sfx('ui');
+      await cover();
       done('team');
     });
   });

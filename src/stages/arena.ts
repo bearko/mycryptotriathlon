@@ -58,6 +58,8 @@ interface Part { x: number; y: number; vx: number; vy: number; life: number; max
 interface Float { x: number; y: number; text: string; color: string; t: number; big: boolean }
 interface Arc { x: number; y: number; ang: number; r: number; t: number; color: string }
 interface Ring { x: number; y: number; r: number; max: number; t: number; color: string }
+/** A four-pointed flash where something was struck down. */
+interface Star { x: number; y: number; r: number; t: number; rot: number; color: string }
 
 export const VH = 540;
 
@@ -98,6 +100,12 @@ export abstract class Arena implements Stage {
   floats: Float[] = [];
   arcs: Arc[] = [];
   rings: Ring[] = [];
+  stars: Star[] = [];
+  /** A white frame over everything for an instant (a big kill), and how hard the screen is rushing (a dash). */
+  flash = 0;
+  rush = 0;
+  private trail: { x: number; y: number }[] = [];
+  private trailT = 0;
   shake = 0;
   hitstop = 0;
   /** Draw a soft shadow under sprites (land) or not (sea). */
@@ -579,6 +587,7 @@ export abstract class Arena implements Stage {
         color: crit ? '#ffe45c' : '#ffffff', t: 0, big: crit,
       });
     }
+    if (crit && this.stars.length < 30) this.stars.push({ x: e.x, y: e.y, r: 26, t: 0, rot: Math.random() * TAU, color: '#ffe45c' });
     if (!by) sfx('hit', 0.05);
     this.onHit(e, d, by);
     if (e.hp <= 0) this.kill(e, by);
@@ -593,10 +602,15 @@ export abstract class Arena implements Stage {
       return;
     }
     this.run.kills += 1;
+    this.host.hud.ko();
     this.run.gum += Math.max(1, Math.round((1 + e.xp * 0.7) * this.st.gum * this.boosts.gain));
     this.puff(e.x, e.y, '#ffffff', e.boss ? 40 : e.elite ? 18 : 7);
     this.puff(e.x, e.y, '#ffb35c', e.boss ? 30 : 4);
+    // struck down: a flash in the shape of a star, and a ring racing out from it
+    if (this.stars.length < 30) this.stars.push({ x: e.x, y: e.y, r: e.boss ? 150 : e.elite ? 80 : 20 + e.size * 0.5, t: 0, rot: Math.random() * TAU, color: '#ffffff' });
     if (e.boss || e.elite) {
+      this.rings.push({ x: e.x, y: e.y, r: 10, max: e.boss ? 260 : 130, t: 0, color: '#ffffff' });
+      this.flash = e.boss ? 1 : 0.55;
       sample('blast', 0.6);
       sfx('boom');
       this.shake = e.boss ? 18 : 9;
@@ -931,8 +945,12 @@ export abstract class Arena implements Stage {
     const h = this.hero;
     h.hp = Math.min(h.maxHp, h.hp + h.maxHp * 0.1);
     sfx('levelup');
-    this.floats.push({ x: h.x, y: h.y - 50, text: `LEVEL ${this.run.level}`, color: '#7dffb0', t: 0, big: true });
-    this.rings.push({ x: h.x, y: h.y, r: 10, max: 90, t: 0, color: '#7dffb0' });
+    this.floats.push({ x: h.x, y: h.y - 50, text: `LEVEL ${this.run.level}`, color: '#d8ff3a', t: 0, big: true });
+    this.rings.push({ x: h.x, y: h.y, r: 10, max: 90, t: 0, color: '#d8ff3a' });
+    this.rings.push({ x: h.x, y: h.y, r: 10, max: 170, t: -0.08, color: '#ffffff' });
+    this.stars.push({ x: h.x, y: h.y, r: 90, t: 0, rot: 0, color: '#d8ff3a' });
+    this.puff(h.x, h.y, '#d8ff3a', 22);
+    this.flash = Math.max(this.flash, 0.35);
   }
 
   /** Re-reads what the carried boosts add up to (after a card is taken). */
@@ -983,6 +1001,19 @@ export abstract class Arena implements Stage {
     this.arcs = this.arcs.filter((a) => a.t < 0.18);
     for (const r of this.rings) r.t += dt;
     this.rings = this.rings.filter((r) => r.t < 0.35);
+    for (const st of this.stars) st.t += dt;
+    this.stars = this.stars.filter((st) => st.t < 0.2);
+    this.flash = Math.max(0, this.flash - dt * 6);
+    // the hero leaves ghosts behind while dashing or boosted, and the screen streaks
+    const h = this.hero;
+    const fast = h.ko <= 0 && (h.dashT > 0 || h.boost > 0 || h.buffSpd > 0);
+    this.rush += ((fast ? 1 : 0) - this.rush) * Math.min(1, dt * 8);
+    this.trailT -= dt;
+    if (this.trailT <= 0) {
+      this.trailT = 0.035;
+      if (fast) this.trail.push({ x: h.x, y: h.y });
+      if (this.trail.length > (fast ? 6 : 0)) this.trail.shift();
+    }
   }
 
   // ------------------------------------------------------------------ drawing
@@ -1059,6 +1090,7 @@ export abstract class Arena implements Stage {
     }
     // rings & arcs under the bodies
     for (const r of this.rings) {
+      if (r.t < 0) continue;
       const k = r.t / 0.35;
       g.globalAlpha = 1 - k;
       g.strokeStyle = r.color;
@@ -1186,16 +1218,60 @@ export abstract class Arena implements Stage {
     for (const f of this.floats) {
       const k = f.t / (f.big ? 1.1 : 0.6);
       g.globalAlpha = k > 0.7 ? (1 - k) / 0.3 : 1;
-      g.font = `${f.big ? 18 : 13}px DotGothic16, sans-serif`;
-      g.lineWidth = 3;
-      g.strokeStyle = 'rgba(10,10,20,0.85)';
+      // numbers land big and settle: the eye catches them without having to read them
+      const pop = 1 + Math.max(0, 1 - f.t / 0.12) * (f.big ? 1.3 : 0.8);
+      const px = (f.big ? 22 : 14) * pop;
+      g.font = `${px}px "Dela Gothic One", DotGothic16, sans-serif`;
+      g.lineWidth = f.big ? 5 : 4;
+      g.lineJoin = 'round';
+      g.strokeStyle = '#07070d';
       g.strokeText(f.text, f.x, f.y);
       g.fillStyle = f.color;
       g.fillText(f.text, f.x, f.y);
     }
     g.globalAlpha = 1;
+    // star flashes over everything in the world
+    for (const st of this.stars) {
+      const k = st.t / 0.2;
+      const r = st.r * (0.4 + k * 0.9);
+      const w = r * 0.16 * (1 - k);
+      g.globalAlpha = 1 - k * k;
+      g.fillStyle = st.color;
+      for (let i = 0; i < 2; i++) {
+        const a = st.rot + (i * Math.PI) / 2;
+        const cx = Math.cos(a);
+        const sy2 = Math.sin(a);
+        g.beginPath();
+        g.moveTo(st.x + cx * r, st.y + sy2 * r);
+        g.lineTo(st.x - sy2 * w, st.y + cx * w);
+        g.lineTo(st.x - cx * r, st.y - sy2 * r);
+        g.lineTo(st.x + sy2 * w, st.y - cx * w);
+        g.fill();
+      }
+    }
+    g.globalAlpha = 1;
     g.restore();
+    // speed lines across the screen while the hero is rushing
+    if (this.rush > 0.05) {
+      g.fillStyle = '#ffffff';
+      const t = this.time * 60;
+      for (let i = 0; i < 16; i++) {
+        const yy = ((i * 97.3 + 13) % this.vh);
+        const len = 60 + ((i * 53) % 140);
+        const xx = this.vw - ((t * (9 + (i % 5) * 3) + i * 131) % (this.vw + len));
+        g.globalAlpha = this.rush * (0.1 + (i % 4) * 0.06);
+        g.fillRect(xx, yy, len, 1 + (i % 3));
+      }
+      g.globalAlpha = 1;
+    }
     this.drawOverlay(g);
+    // a white frame for an instant: kept faint, and left out for anyone who has asked for less motion
+    if (this.flash > 0.02 && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      g.globalAlpha = Math.min(0.45, this.flash * 0.6);
+      g.fillStyle = '#ffffff';
+      g.fillRect(0, 0, this.vw, this.vh);
+      g.globalAlpha = 1;
+    }
   }
 
   protected drawHero(g: CanvasRenderingContext2D, blink: boolean): void {
@@ -1203,9 +1279,11 @@ export abstract class Arena implements Stage {
     if (blink) g.globalAlpha = 0.45;
     const out = h.ko > 0;
     const bob = out ? 6 : h.moving ? Math.abs(Math.sin(h.bob)) * -4 : 0;
-    if (!out && (h.boost > 0 || h.buffSpd > 0)) {
-      g.globalAlpha = 0.3;
-      this.sprite(g, this.heroArt.img, h.x - h.vx * 0.07, h.y + bob - h.vy * 0.07, 64, h.flip);
+    if (!out && this.trail.length) {
+      for (let i = 0; i < this.trail.length; i++) {
+        g.globalAlpha = 0.07 + (i / this.trail.length) * 0.3;
+        this.sprite(g, this.heroArt.img, this.trail[i].x, this.trail[i].y + bob, 64, h.flip);
+      }
       g.globalAlpha = blink ? 0.45 : 1;
     }
     this.sprite(g, this.heroArt.img, h.x, h.y + bob, 64, h.flip, false, out);

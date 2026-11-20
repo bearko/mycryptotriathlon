@@ -647,6 +647,7 @@ export class SkyStage implements Stage {
       this.boom(f.x, f.y, f.z, f.r * 5, this.glowWarm, 0.4);
       if (by?.me) {
         this.run.kills += 1;
+        this.host.hud.ko();
         this.boost = Math.min(1, this.boost + 0.08);
         sfx('kill', 0.07);
       }

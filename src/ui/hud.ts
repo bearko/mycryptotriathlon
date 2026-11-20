@@ -2,6 +2,7 @@
 // Top row: place and qualifying spots, the commentary booth, the clock.
 
 import { cat, RARITY_COLOR } from '../core/catalog';
+import { sfx } from '../core/audio';
 import { pressItem } from '../core/input';
 import { iconOf, itemImg, type Item } from '../game/roster';
 import { fmtTime } from '../core/util';
@@ -43,7 +44,7 @@ export function createHud(root: HTMLElement): HudView {
     </div>
     <div class="hud-prog"><i id="h-prog"></i><span id="h-marks"></span><span id="h-dots"></span><em id="h-dot"></em></div>
     <div class="hud-vitals">
-      <div class="gauge"><i id="h-gauge"></i><span id="h-gtext"></span></div>
+      <div class="gauge"><u id="h-ghost"></u><i id="h-gauge"></i><span id="h-gtext"></span></div>
       <div class="gauge sub" id="h-subwrap"><i id="h-sub"></i></div>
       <div class="lv"><span id="h-lv">Lv1</span><div class="xp"><i id="h-xp"></i></div><span class="gum"><img src="${cat.icons.gum}" alt=""><b id="h-gum">0</b></span></div>
       <div class="fouls" id="h-fouls"></div>
@@ -54,11 +55,16 @@ export function createHud(root: HTMLElement): HudView {
     <div class="hud-slots" id="h-slots"></div>
     <div class="hud-banner" id="h-banner"><b></b><small></small></div>
     <div class="hud-cutin" id="h-cutin"><img alt=""><div><small>PASSIVE SKILL</small><b></b><p></p></div></div>
-    <div class="hud-pen" id="h-pen"></div>`;
+    <div class="hud-pen" id="h-pen"></div>
+    <div class="hud-combo" id="h-combo"><b></b><small>KO!</small></div>`;
   root.appendChild(el);
   const $ = <T extends HTMLElement = HTMLElement>(id: string) => el.querySelector<T>(`#${id}`)!;
   const time = $('h-time');
   const gauge = $('h-gauge');
+  const ghost = $('h-ghost');
+  const combo = $('h-combo');
+  let comboN = 0;
+  let comboT = 0;
   const gtext = $('h-gtext');
   const sub = $('h-sub');
   const subwrap = $('h-subwrap');
@@ -165,6 +171,8 @@ export function createHud(root: HTMLElement): HudView {
       foulsEl.innerHTML = '';
       itemsEl.innerHTML = '';
       lastGum = -1;
+      comboN = 0;
+      combo.classList.remove('on');
       dotsEl.innerHTML = '';
       dotEls = [];
       queue.length = 0;
@@ -181,9 +189,12 @@ export function createHud(root: HTMLElement): HudView {
     gauge(frac, text) {
       const f = Math.round(frac * 200) / 200;
       if (f !== lastG) {
-        lastG = f;
         gauge.style.transform = `scaleX(${f})`;
+        // the ghost follows a moment later when the bar drops, and at once when it rises
+        ghost.style.transitionDuration = f > (lastG < 0 ? 0 : lastG) ? '0s' : '';
+        ghost.style.transform = `scaleX(${f})`;
         gauge.parentElement!.classList.toggle('low', f < 0.3);
+        lastG = f;
       }
       if (text !== lastGT) {
         lastGT = text;
@@ -236,6 +247,7 @@ export function createHud(root: HTMLElement): HudView {
         rankbox.classList.remove('up', 'down');
         void rankbox.offsetWidth;
         rankbox.classList.add(p < was ? 'up' : 'down');
+        sfx(p < was ? 'rankUp' : 'rankDown', 0.9);
       }
     },
     fouls(n, limit) {
@@ -266,8 +278,14 @@ export function createHud(root: HTMLElement): HudView {
     },
     gum(n) {
       if (n === lastGum) return;
+      const first = lastGum < 0;
       lastGum = n;
       gumEl.textContent = String(n);
+      if (!first) {
+        gumEl.parentElement!.classList.remove('pop');
+        void gumEl.offsetWidth;
+        gumEl.parentElement!.classList.add('pop');
+      }
     },
     items(list, max) {
       itemsEl.innerHTML = Array.from({ length: max }, (_, i) => {
@@ -329,6 +347,22 @@ export function createHud(root: HTMLElement): HudView {
       if (queue.length > 5) queue.length = 5;
       pump();
     },
+    ko() {
+      comboN += 1;
+      window.clearTimeout(comboT);
+      comboT = window.setTimeout(() => {
+        comboN = 0;
+        combo.classList.remove('on');
+      }, 2400);
+      if (comboN < 3) return;
+      combo.querySelector('b')!.textContent = String(comboN);
+      combo.classList.add('on');
+      combo.classList.toggle('big', comboN >= 20);
+      combo.classList.remove('hit');
+      void combo.offsetWidth;
+      combo.classList.add('hit');
+      if (comboN % 10 === 0) sfx('armed');
+    },
     cutin(image, name, text) {
       cutin.querySelector('img')!.src = image;
       cutin.querySelector('b')!.textContent = name;
@@ -336,6 +370,7 @@ export function createHud(root: HTMLElement): HudView {
       cutin.classList.remove('on');
       void cutin.offsetWidth;
       cutin.classList.add('on');
+      sfx('whoosh');
       window.clearTimeout(cutT);
       cutT = window.setTimeout(() => cutin.classList.remove('on'), 2300);
     },

@@ -1,6 +1,9 @@
 import '@fontsource/dotgothic16/400.css';
 import '@fontsource/dela-gothic-one/400.css';
+
 import './styles/main.css';
+import './styles/show.css';
+import { initFx } from './ui/fx';
 
 import { preload } from './core/assets';
 import { isMuted, playBgm, setMute, unlockAudio } from './core/audio';
@@ -27,6 +30,7 @@ app.appendChild(mount);
 const hud = createHud(app);
 initInput(app);
 initScreens(app);
+initFx(app);
 
 // Debug switches (not linked from anywhere): ?stage=sea&bot=1&quick=1&speed=4&heroes=1001,2001,3001
 const q = new URLSearchParams(location.search);
