@@ -15,6 +15,10 @@ import type { Host } from './stage';
 const H = 1000;
 const TOP = 70;
 const BOTTOM = 930;
+/** Panels in one row of chests, how long a taken one stays away, and how far before a gate the run turns into free movement. */
+const CHEST_ROW = 6;
+const CHEST_BACK = 5;
+const FREE_ZONE = 560;
 export const FIELD = 50;
 export const QUOTA = 30;
 /** Rivals' cruising speed: the slowest and how much faster the best are. */
@@ -24,7 +28,7 @@ const PACE_SPAN = 74;
 interface Gate { x: number; boss: Enemy | null; art: EnemyArt; need: number; size: number; tier: number; first: boolean; passed: number }
 interface Decor { x: number; y: number; kind: number; s: number }
 interface Pad { x: number; y: number }
-interface Chest { x: number; y: number; taken: boolean; t: number }
+interface Chest { x: number; y: number; taken: boolean; t: number; back: number }
 interface Roller { x: number; y: number; life: number; owner: Runner; rot: number }
 interface Trap { x: number; y: number; owner: Runner; t: number }
 
@@ -37,6 +41,7 @@ export class LandStage extends Arena {
   private decor: Decor[] = [];
   private pads: Pad[] = [];
   private chests: Chest[] = [];
+  private freeMove = false;
   private rollers: Roller[] = [];
   private traps: Trap[] = [];
   private spawnT = 1.2;
@@ -95,13 +100,15 @@ export class LandStage extends Arena {
       this.refs.push({ x, y: H / 2, r: 230, homeY: H / 2 + (i % 2 ? 130 : -130), t: i * 2.1, alert: 0 });
     });
 
-    // treasure-chest panels: step on one for a helper item. Off the centre line, so taking it is a choice
-    const n = Math.round(9 * st.chests * st.course);
+    // treasure-chest panels: a row right across the road, so nobody can miss it. Step on one for a helper item;
+    // a panel that has been taken comes back after a few seconds
+    const n = Math.round(7 * st.chests * st.course);
     for (let i = 0; i < n; i++) {
-      const x = 700 + ((L - 1500) / n) * i + (rng() - 0.5) * 200;
-      if (this.gates.some((gt) => Math.abs(gt.x - x) < 260)) continue;
-      const lanes = [-1, 0, 1].sort(() => rng() - 0.5).slice(0, 2);
-      for (const lane of lanes) this.chests.push({ x, y: H / 2 + lane * 250, taken: false, t: rng() * 5 });
+      const x = 800 + ((L - 1600) / n) * i;
+      if (this.gates.some((gt) => x > gt.x - 700 && x < gt.x + 200)) continue;
+      for (let k = 0; k < CHEST_ROW; k++) {
+        this.chests.push({ x, y: TOP + ((BOTTOM - TOP) * (k + 0.5)) / CHEST_ROW, taken: false, t: k * 0.4, back: 0 });
+      }
     }
     // things the skill tree adds to the course
     if (st.pads) {
@@ -206,17 +213,34 @@ export class LandStage extends Arena {
   protected heroControl(dt: number): void {
     const h = this.hero;
     const my = input.move.y;
-    const ease = input.move.x < -0.4 ? 0.5 : 1;
-    h.moving = true;
-    h.bob += dt * 11;
-    h.flip = true;
+    const gate = this.gates[h.gate];
+    // in front of a guardian the run stops: move freely to get at it (or away from it)
+    const free = !!gate && h.x > gate.x - FREE_ZONE;
+    if (free !== this.freeMove) {
+      this.freeMove = free;
+      if (free) this.host.hud.say('番人の前では自由に動ける！ 近づいて攻撃を当てろ！', 1, 'ain');
+    }
+    const ease = free ? input.move.x : input.move.x < -0.4 ? 0.5 : 1;
+    h.moving = !free || Math.abs(input.move.x) + Math.abs(my) > 0.1;
+    if (h.moving) h.bob += dt * 11;
+    if (!free) h.flip = true;
+    else if (Math.abs(input.move.x) > 0.2) h.flip = input.move.x > 0;
     let sp = h.speed * this.boosts.speed * (h.slow > 0 ? 0.6 + 0.4 * Math.min(1, this.st.grit) : 1) * (h.buffSpd > 0 ? 1.25 : 1) * (h.boost > 0 ? 1.4 : 1) * (h.dragon > 0 ? 2.1 : 1);
     if (this.st.draft > 0 && this.drafting()) sp *= 1 + this.st.draft;
-    h.fx = 1;
-    h.fy = 0;
+    if (free) {
+      const m = Math.hypot(input.move.x, my);
+      if (m > 0.2) {
+        h.fx = input.move.x / m;
+        h.fy = my / m;
+      }
+    } else {
+      h.fx = 1;
+      h.fy = 0;
+    }
     if (h.dashT > 0) {
       h.dashT -= dt;
-      h.vx = sp * 2.5;
+      h.vx = h.fx * sp * 2.5;
+      if (free) h.vy = h.fy * sp * 2.5;
       if (Math.random() < 0.7) this.puff(h.x - 14, h.y + 10, '#ffffff', 1);
     } else {
       h.vx += (sp * ease - h.vx) * Math.min(1, dt * 10);
@@ -255,6 +279,13 @@ export class LandStage extends Arena {
     const back = (this.place - 1) / (FIELD - 1);
     for (const c of this.chests) {
       c.t += dt;
+      if (c.taken) {
+        c.back += dt;
+        if (c.back >= CHEST_BACK) {
+          c.taken = false;
+          c.back = 0;
+        }
+      }
       if (c.taken || h.ko > 0 || Math.abs(c.x - h.x) > 40 || Math.abs(c.y - h.y) > 44) continue;
       if (this.run.items.length >= this.st.itemSlots) continue;
       c.taken = true;
@@ -808,8 +839,18 @@ export class LandStage extends Arena {
         g.fill();
       }
     }
+    let rowX = -1;
     for (const c of this.chests) {
-      if (c.taken || c.x < this.camX - 60 || c.x > x1) continue;
+      if (c.x < this.camX - 60 || c.x > x1) continue;
+      if (c.x !== rowX) {
+        rowX = c.x;
+        g.fillStyle = 'rgba(255,228,92,0.16)';
+        g.fillRect(c.x - 52, TOP, 104, BOTTOM - TOP);
+        g.fillStyle = 'rgba(255,228,92,0.55)';
+        g.fillRect(c.x - 52, TOP, 4, BOTTOM - TOP);
+        g.fillRect(c.x + 48, TOP, 4, BOTTOM - TOP);
+      }
+      if (c.taken) continue;
       const glow = 0.5 + Math.sin(c.t * 5) * 0.5;
       g.fillStyle = `rgba(255,228,92,${0.18 + glow * 0.14})`;
       g.fillRect(c.x - 40, c.y - 44, 80, 88);
@@ -943,6 +984,6 @@ export class LandStage extends Arena {
         y += ((h.y - e.y) / d) * 1.2;
       }
     }
-    return { x: 0, y: clamp(y, -1, 1), a: !b && h.dashCd <= 0 && Math.random() < 0.05, b: strike };
+    return { x: b ? clamp(x, -1, 1) : 0, y: clamp(y, -1, 1), a: !b && h.dashCd <= 0 && Math.random() < 0.05, b: strike };
   }
 }
