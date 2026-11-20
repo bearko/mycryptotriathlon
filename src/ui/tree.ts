@@ -3,6 +3,7 @@
 
 import { sample, sfx, unlockAudio } from '../core/audio';
 import { cat } from '../core/catalog';
+import { step } from '../core/platform';
 import { ambient, burstAt, countUp, cover, isCovered, kick, replay, uncover } from './fx';
 import {
   BRANCHES, buy, canBuy, costOf, FEATS, isOpen, levelOf, meta, NODE, SKILLS, type SkillNode,
@@ -112,6 +113,7 @@ export function treeScreen(layer: HTMLElement): Promise<'race' | 'team'> {
       sfx('hit');
       return;
     }
+    step('tree');
     sfx('stamp');
     sfx('armed');
     sample('buff', 0.5);

@@ -152,7 +152,9 @@
 .tt-ticker { position: absolute; left: 0; right: 0; bottom: var(--safe-b); height: 22px; display: flex; overflow: hidden; background: var(--paper); color: var(--ink0); font-size: 12px; line-height: 22px; white-space: nowrap; z-index: 5 !important; }
 .tt-ticker span { flex: 0 0 auto; padding-right: 3em; animation: marquee 30s linear infinite; }
 .tt-ticker b { font-family: var(--display); font-weight: 400; color: var(--hot); margin: 0 .3em; }
-.title #t-about { position: absolute; left: calc(10px + var(--safe-l)); bottom: calc(30px + var(--safe-b)); z-index: 6 !important; font-size: 10px; min-height: 32px; padding: 2px 10px; }
+.tt-links { position: absolute; left: calc(10px + var(--safe-l)); bottom: calc(30px + var(--safe-b)); z-index: 6; display: flex; gap: 10px; }
+.tt-links .btn { font-size: 10px; min-height: 32px; padding: 2px 10px; }
+.tt-links .btn[hidden] { display: none; }
 
 /* ------------------------------------------------------------------ relay line-up */
 .select { background: none; }

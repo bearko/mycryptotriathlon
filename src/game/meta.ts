@@ -265,5 +265,13 @@ export function earn(id: string): Feat | null {
   if (!f) return null;
   m.feats.push(id);
   m.medal += 1;
+  onFeat?.(id);
   return f;
 }
+let onFeat: ((id: string) => void) | null = null;
+/** Somebody outside the rules wants to hear about medals (the shared platform's achievements). */
+export function watchFeats(fn: (id: string) => void): void {
+  onFeat = fn;
+}
+/** Skill-tree levels bought so far, all panels together. */
+export const treeLevels = () => Object.values(meta().lv).reduce((a, b) => a + b, 0);

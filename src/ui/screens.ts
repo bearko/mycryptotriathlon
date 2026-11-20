@@ -1,6 +1,7 @@
 // Everything outside the races: title, relay line-up, the cards between races, the hangar, the result.
 
 import { muffle, sample, sfx, unlockAudio } from '../core/audio';
+import { openChat, whenReady } from '../core/platform';
 import {
   ARM_SLOTS, autoTune, DEFAULT_ARM, gumLeft, openTune, rankCost, rankSpan, rowValue, SKY_ARMS, TUNE_MAX, TUNE_ROWS, tuneRate, type ArmKind, type TuneId,
 } from '../game/tuning';
@@ -95,7 +96,7 @@ export function titleScreen(): Promise<void> {
       <div class="tt-leg sky"><b>空</b><span>SKY</span><em>最後の1組</em></div>
       <div class="tt-cta"><button class="btn big" id="t-start">START</button><p class="tt-any">TAP ／ PRESS ANY KEY</p></div>
     </div>
-    <button class="btn ghost small" id="t-about">このゲームについて</button>
+    <div class="tt-links"><button class="btn ghost small" id="t-about">このゲームについて</button><button class="btn ghost small" id="t-chat" hidden>💬 全体チャット</button></div>
     <div class="tt-ticker"><span>${news}</span><span>${news}</span></div>`);
   return new Promise((res) => {
     let gone = false;
@@ -119,6 +120,13 @@ export function titleScreen(): Promise<void> {
       unlockAudio();
       sfx('ui');
       aboutModal();
+    });
+    // the chat of the shared platform: the button only exists once the platform has answered
+    const chat = el.querySelector<HTMLButtonElement>('#t-chat')!;
+    whenReady(() => (chat.hidden = false));
+    chat.addEventListener('click', () => {
+      sfx('ui');
+      openChat();
     });
   });
 }

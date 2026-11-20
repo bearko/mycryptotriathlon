@@ -23,3 +23,4 @@
 - 空の機体は `src/game/tuning.ts`（売却・ランクの値段・武装・`tuneStats`）と `screens.ts` の `tuneScreen`。空のレースが読むのは `tuneStats(run)` だけで、陸・海のエクステンション（`run.slots`）は空では使わない。
 - 空は 10 機のバトルロワイヤル（`sky.ts`）。弾は前（-z）にしか飛ばず、位置取り（`z`）はブーストとブレーキで変える。うしろにいる間はエネルギーが回復しない（`charge`）— 全機がうしろの壁に貼りつくのを防ぐ決まりなので外さない。ライバルは `scan`（ねらう相手）→ `decide`（行きたい場所）→ `rivalAI`。難度は `RIVAL_HP`・`RIVAL_DMG`・`PLAYER_X`（自機の弾がライバルに通る割合）・`RIVAL_X`。`RIVAL_DMG` は 2 変えるだけで勝率が大きく動くので、変えたら自動操縦で 8 回は回す。
 - 見た目の決まりは `docs/GAME_DESIGN.md` の「見た目と手触りの決まり」。スタイルは `src/styles/main.css`（土台）→ `src/styles/show.css`（上書き。新しい見た目はこちらに書く）。画面の切り替え・火花・紙吹雪・背景は `src/ui/fx.ts`（`cover`/`uncover`・`burst`・`confetti`・`ambient`）。`cover()` したら、次に `open()`（または `treeScreen`）で画面を出すこと — それが帯を開ける。新しい画面やボタンを足すときは、現れ方・押したときの音と動きまで付ける。
+- bearko.games の共通基盤（ログイン・アチーブメント・総合スコア・チャット）へは `src/core/platform.ts` だけが話す。決まりと送っているものの一覧は `docs/PLATFORM.md`。SDK が読めない・通信が失敗してもゲームは最後まで動くこと。段（`STEPS`）の番号と id は公開後に変えない。デバッグ用の URL ではつながない。ポータル掲載用の画像は `docs/portal/`。

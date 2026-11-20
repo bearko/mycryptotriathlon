@@ -10,7 +10,8 @@ import { isMuted, playBgm, setMute, unlockAudio } from './core/audio';
 import { cat, heroById, type Hero } from './core/catalog';
 import { initInput, input, pollInput, setPad } from './core/input';
 import { makeRng } from './core/util';
-import { earn, meta, saveMeta, setMetaForTest } from './game/meta';
+import { earn, meta, saveMeta, setMetaForTest, treeLevels, watchFeats } from './game/meta';
+import { chatVisible, startPlatform, step, submitRun, trophy, whenReady } from './core/platform';
 import { payout } from './game/reward';
 import { COURSE_SEED, drawCards, newRun, STAGES, takeCard, type Run, type StageId } from './game/run';
 import { stats } from './game/meta';
@@ -98,7 +99,7 @@ async function playStage(run: Run, index: number): Promise<'done' | 'restart' | 
   const tuned = id === 'sky' ? await tuneScreen(run, debug.quick) : 0;
   const host: Host = {
     run, seed: COURSE_SEED, mount, hud, bot: debug.bot,
-    pick: (r) => levelUpScreen(r, debug.bot),
+    pick: (r) => levelUpScreen(r, debug.bot).then(() => step('levelup')),
     items: (r) => hud.items(r.items, stats().itemSlots),
   };
   baseTime = run.splits.reduce((a, b) => a + b, 0);
@@ -109,7 +110,9 @@ async function playStage(run: Run, index: number): Promise<'done' | 'restart' | 
   if (id === 'land') host.items(run);
   playBgm(id);
   setPad(true, PAD[id][0], PAD[id][1]);
+  chatVisible(false);
   await introCard(id, index, run, debug.quick);
+  if (id === 'land') step(meta().runs >= 1 ? 'retry' : 'race');
   outro = { index, run, shown: false };
   playing = true;
   const result = await new Promise<'done' | 'restart' | 'quit'>((res) => (settle = res));
@@ -157,6 +160,7 @@ async function runOnce(heroes: [Hero, Hero, Hero]): Promise<'again' | 'team' | '
   let out: StageId | null = null;
   for (let i = from; i < STAGES.length; i++) {
     const r = await playStage(run, i);
+    if (r === 'restart' || r === 'quit') chatVisible(true);
     if (r === 'restart') return 'again';
     if (r === 'quit') return 'quit';
     if (STAGES[i] === 'land') land = lastResult;
@@ -171,6 +175,16 @@ async function runOnce(heroes: [Hero, Hero, Hero]): Promise<'again' | 'team' | '
   if (cleared >= 2) earn('sea');
   if (cleared >= 3) earn('sky');
   const pay = payout(run, land, sea, sky, featsBefore);
+  // the attempt is over: its result goes to the shared platform, once
+  chatVisible(true);
+  step('result');
+  submitRun({
+    cleared, champion: cleared >= 3,
+    landPlace: land?.place ?? null, landProgress: land ? Math.round(land.progress * 1000) / 1000 : 0, landGates: land?.gates ?? 0, landQualified: !!land?.qualified,
+    seaPlace: sea?.place ?? null, seaProgress: sea ? Math.round(sea.progress * 1000) / 1000 : 0, seaRelics: sea?.gates ?? 0, seaQualified: !!sea?.qualified,
+    skyPlace: sky?.place ?? null, skyKills: sky?.gates ?? 0,
+    kills: run.kills, level: run.level, downs: run.downs, timeMs: Math.round(run.splits.reduce((a, b) => a + b, 0) * 1000), tree: treeLevels(),
+  });
   playBgm('title', 0.35);
   if (out && lastResult) await outScreen(out, lastResult, pay);
   else if (cleared >= 3) await resultScreen(run, pay);
@@ -180,6 +194,18 @@ async function runOnce(heroes: [Hero, Hero, Hero]): Promise<'again' | 'team' | '
 }
 
 async function boot(): Promise<void> {
+  // The shared platform. Debug sessions (bots, a seeded tree, a race opened directly) stay off it,
+  // so that test runs never reach the rankings or the visitor counts.
+  if (!debug.bot && !debug.quick && !debug.stage && debug.tree === null) {
+    startPlatform();
+    watchFeats((id) => {
+      trophy(id);
+      if (id === 'gate1') step('gate1');
+      if (id === 'land30') step('done');
+    });
+    // medals earned before the platform knew this title (or while it could not be reached) are offered again
+    whenReady(() => meta().feats.forEach(trophy));
+  }
   void preload([cat.icons.ce, cat.bg.title]);
   let last = performance.now();
   const frame = (now: number) => {
@@ -212,7 +238,10 @@ async function boot(): Promise<void> {
   let skipTitle = !!debug.stage || debug.quick;
   for (;;) {
     playBgm('title', 0.35);
-    if (!skipTitle) await titleScreen();
+    if (!skipTitle) {
+      await titleScreen();
+      step('start');
+    }
     let heroes: [Hero, Hero, Hero] | null = null;
     const saved = meta().team.map((id) => heroById.get(id)).filter(Boolean) as Hero[];
     if (debug.heroes.length === 3) heroes = debug.heroes as [Hero, Hero, Hero];
@@ -221,6 +250,7 @@ async function boot(): Promise<void> {
     for (;;) {
       if (!heroes) {
         heroes = await selectScreen();
+        step('team');
         meta().team = heroes.map((h) => h.id);
         saveMeta();
       }
