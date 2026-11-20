@@ -1,197 +1,181 @@
-// State of one run: three heroes in relay, the gear they pass on like a baton, and the clock.
+// State of one attempt: three heroes in relay, the gear they carry (it is the baton), experience and GUM.
+// Gear is gained by levelling up: each level offers a few cards, and one is taken.
 
-import { cat, type Ext, type Hero, type Kind, traitsOf, type Traits } from '../core/catalog';
-import { makeRng, pick, type Rng } from '../core/util';
-import { stats } from './meta';
+import { type Hero, type Kind, traitsOf } from '../core/catalog';
+import { makeRng, type Rng } from '../core/util';
+import { stats, type Stats } from './meta';
+import { DEF, ITEMS, MAX_LV, ROSTER, type Def, type Item } from './roster';
 
 export const STAGES = ['land', 'sea', 'sky'] as const;
 export type StageId = (typeof STAGES)[number];
 export const STAGE_NAME: Record<StageId, string> = { land: '陸', sea: '海', sky: '空' };
 export const STAGE_EN: Record<StageId, string> = { land: 'LAND', sea: 'SEA', sky: 'SKY' };
 
-export const MAX_LV = 5;
-/** Seconds added to the clock when a hero goes down (there is no game over). */
+/** Seconds added to the clock when a hero goes down in a race without rivals (sea / sky for now). */
 export const DOWN_PENALTY = 8;
-/** The course is the same for everyone, so routes can be learned and times compared. */
+/** The course is the same for everyone, so routes can be learned. */
 export const COURSE_SEED = 20261120;
 
-export interface Slot { ext: Ext; lv: number }
+export interface Slot { def: Def; lv: number }
 
 export interface Run {
   heroes: [Hero, Hero, Hero];
   slots: Slot[];
-  /** Ids of the slots bolted onto the fighter (set in the hangar). */
-  fighter: number[];
+  /** Ids of the gear bolted onto the fighter (set in the hangar). */
+  fighter: string[];
   level: number;
   xp: number;
+  gum: number;
+  /** Level-ups waiting for a card to be picked. */
+  pending: number;
+  rerolls: number;
+  /** Helper items from the chest panels, oldest first. */
+  items: Item[];
   splits: number[];
   downs: number;
   kills: number;
-  /** Series that can turn up on this course. */
-  pool: Ext[][];
   rng: Rng;
 }
 
-export const xpNeed = (level: number) => 10 + level * 12;
-/** Damage bonus from the team level. */
-export const levelMul = (level: number) => (1 + (level - 1) * (0.05 + stats().awake)) * stats().dmg;
+export const xpNeed = (level: number) => Math.round(5 * Math.pow(1.3, level - 1));
+/** Damage bonus from the team level and the skill tree. */
+export const levelMul = (level: number) => (1 + (level - 1) * stats().awake) * stats().dmg;
 
-/** Picks the series that appear on the course: at least one of every kind, a few doubled up. */
-function buildPool(rng: Rng): Ext[][] {
-  const byKind = new Map<Kind, Map<number, Ext[]>>();
-  for (const e of cat.exts) {
-    if (!byKind.has(e.kind)) byKind.set(e.kind, new Map());
-    const m = byKind.get(e.kind)!;
-    if (!m.has(e.series)) m.set(e.series, []);
-    m.get(e.series)!.push(e);
-  }
-  const pool: Ext[][] = [];
-  // Kinds beyond the first three are opened in the skill tree: the course itself changes as the tree grows.
-  const st = stats();
-  const kinds: Kind[] = ['slash', 'shot', 'armor'];
-  if (st.kMagic) kinds.push('magic');
-  if (st.kOrbit) kinds.push('orbit');
-  if (st.kBeast) kinds.push('beast');
-  if (st.kAura) kinds.push('aura');
-  for (const k of kinds) {
-    const series = [...byKind.get(k)!.values()].filter((s) => s.length >= 5);
-    const first = pick(rng, series);
-    pool.push(first);
-    if (k === 'slash' || k === 'shot' || k === 'magic') {
-      const rest = series.filter((s) => s !== first);
-      if (rest.length) pool.push(pick(rng, rest));
-    }
-  }
-  return pool;
-}
+export const isOpen = (d: Def, st: Stats = stats()) => !d.key || (st as unknown as Record<string, number>)[d.key] > 0;
+export const maxLvOf = (st: Stats = stats()) => Math.min(MAX_LV, st.maxLv);
 
 export function newRun(heroes: [Hero, Hero, Hero], seed = COURSE_SEED): Run {
-  const rng = makeRng(seed);
-  const run: Run = {
-    heroes, slots: [], fighter: [], level: 1, xp: 0, splits: [], downs: 0, kills: 0,
-    pool: buildPool(rng), rng,
-  };
-  // The first runner starts with one plain weapon that suits them.
-  const t = traitsOf(heroes[0]);
-  const want: Kind = t.int > t.phy ? 'magic' : t.agi > t.phy ? 'shot' : 'slash';
-  const series = run.pool.find((s) => s[0].kind === want) ?? run.pool[0];
-  const starter = series.find((e) => e.rarity === 1) ?? series[0];
   const st = stats();
-  run.slots.push({ ext: starter, lv: Math.min(MAX_LV, st.startLv) });
+  const run: Run = {
+    heroes, slots: [], fighter: [], level: 1, xp: 0, gum: 0, pending: 0, rerolls: st.reroll, items: [],
+    splits: [], downs: 0, kills: 0, rng: makeRng(seed),
+  };
+  // The first runner starts with one weapon that suits them.
+  const t = traitsOf(heroes[0]);
+  const first = t.phy >= t.int && t.phy >= t.agi ? 'blade' : t.agi >= t.int ? 'knife' : 'revolver';
+  run.slots.push({ def: DEF.get(first)!, lv: Math.min(maxLvOf(st), st.startLv) });
   for (let i = 0; i < st.startExtra; i++) {
-    const more = run.pool.filter((s) => !run.slots.some((x) => x.ext.series === s[0].series) && s[0].kind !== 'armor');
-    if (!more.length) break;
-    const s2 = pick(rng, more);
-    run.slots.push({ ext: s2.find((e) => e.rarity === 1) ?? s2[0], lv: 1 });
+    const more = ROSTER.filter((d) => d.weapon && isOpen(d, st) && !run.slots.some((s) => s.def === d));
+    if (more.length) run.slots.push({ def: more[Math.floor(Math.random() * more.length)], lv: 1 });
   }
   return run;
 }
 
-/** Rolls a piece of gear from the course pool. `luck` 0..1 shifts the rarity upward. */
-export function rollExt(run: Run, rng: Rng, luck: number): Ext {
-  const series = pick(rng, run.pool);
+/** What can still be offered: gear already carried that can grow, and new gear while there is room for its kind. */
+export function eligible(run: Run, st: Stats = stats()): Def[] {
+  const max = maxLvOf(st);
+  const weapons = run.slots.filter((s) => s.def.weapon).length;
+  const boosts = run.slots.length - weapons;
+  return ROSTER.filter((d) => {
+    const own = run.slots.find((s) => s.def === d);
+    if (own) return own.lv < max;
+    if (!isOpen(d, st)) return false;
+    return d.weapon ? weapons < st.wSlots : boosts < st.bSlots;
+  });
+}
+
+/** Cards for one level-up: a weapon first when one is possible, then anything, no repeats. */
+export function drawCards(run: Run, exclude: Set<string> = new Set(), rnd: () => number = Math.random): Def[] {
   const st = stats();
-  luck = Math.min(1, luck + st.luck);
-  const r = rng();
-  const w = [0.5 - luck * 0.38, 0.3 - luck * 0.1, 0.14 + luck * 0.2, 0.05 + luck * 0.18, 0.01 + luck * 0.1];
-  let acc = 0;
-  let rarity = 1;
-  for (let i = 0; i < 5; i++) {
-    acc += w[i];
-    if (r < acc) {
-      rarity = i + 1;
-      break;
-    }
-    rarity = 5;
-  }
-  rarity = Math.min(rarity, st.maxRarity);
-  return series.find((e) => e.rarity === rarity) ?? series.find((e) => e.rarity <= rarity) ?? series[0];
+  const pool = eligible(run, st);
+  const fresh = pool.filter((d) => !exclude.has(d.id));
+  const src = fresh.length >= Math.min(st.options, pool.length) ? fresh : pool;
+  const out: Def[] = [];
+  const weapons = src.filter((d) => d.weapon);
+  if (weapons.length) out.push(weapons[Math.floor(rnd() * weapons.length)]);
+  const rest = src.filter((d) => !out.includes(d)).sort(() => rnd() - 0.5);
+  while (out.length < st.options && rest.length) out.push(rest.pop()!);
+  return out.sort(() => rnd() - 0.5);
 }
 
-export interface Gain { slot: Slot; kind: 'new' | 'up' | 'max'; }
-
-/**
- * Takes a piece of gear. Same series -> that slot levels up (and takes the better art).
- * A free slot -> it is equipped. Otherwise it is broken down into a level for the weakest matching slot.
- */
-export function takeExt(run: Run, ext: Ext): Gain {
-  const same = run.slots.find((s) => s.ext.series === ext.series);
-  if (same) {
-    if (ext.rarity > same.ext.rarity) same.ext = ext;
-    if (same.lv < MAX_LV) {
-      same.lv += 1;
-      return { slot: same, kind: 'up' };
-    }
-    return { slot: same, kind: 'max' };
-  }
-  if (run.slots.length < stats().slots) {
-    const slot = { ext, lv: Math.random() < stats().gearLv2 ? 2 : 1 };
+/** Takes a card: new gear at Lv1, or one more level for gear already carried. */
+export function takeCard(run: Run, d: Def): Slot {
+  let slot = run.slots.find((s) => s.def === d);
+  if (slot) slot.lv = Math.min(maxLvOf(), slot.lv + 1);
+  else {
+    slot = { def: d, lv: 1 };
     run.slots.push(slot);
-    return { slot, kind: 'new' };
   }
-  const open = run.slots.filter((s) => s.lv < MAX_LV);
-  if (!open.length) return { slot: run.slots[0], kind: 'max' };
-  const sameKind = open.filter((s) => s.ext.kind === ext.kind);
-  const list = sameKind.length ? sameKind : open;
-  const target = list.reduce((a, b) => (b.lv < a.lv ? b : a));
-  target.lv += 1;
-  return { slot: target, kind: 'up' };
+  return slot;
 }
 
-/** Adds experience. Returns true when the team level went up. */
-export function addXp(run: Run, n: number): boolean {
+/** Adds experience. Level-ups are queued in `run.pending`. Returns how many levels were gained. */
+export function addXp(run: Run, n: number): number {
   run.xp += n;
-  let up = false;
+  let ups = 0;
   while (run.xp >= xpNeed(run.level)) {
     run.xp -= xpNeed(run.level);
     run.level += 1;
-    up = true;
+    run.pending += 1;
+    ups++;
   }
-  return up;
+  return ups;
 }
 
-/** Base damage of a slot before the hero's own strength. */
-export function slotPower(s: Slot): number {
-  const base = [0, 10, 13, 17, 22, 28][s.ext.rarity];
-  return base * (1 + 0.4 * (s.lv - 1));
+export interface Boosts {
+  hp: number; regen: number; speed: number; cd: number; taken: number; dmg: number; bullets: number; range: number;
+  pickup: number; pierce: number; gain: number;
+}
+/** Everything the carried boosts add up to. */
+export function boostsOf(run: Run): Boosts {
+  const b: Boosts = { hp: 0, regen: 0, speed: 1, cd: 1, taken: 1, dmg: 1, bullets: 0, range: 1, pickup: 1, pierce: 0, gain: 1 };
+  for (const s of run.slots) {
+    if (s.def.weapon) continue;
+    const m = s.def.tiers[s.lv - 1].mag ?? 0;
+    switch (s.def.arch) {
+      case 'hpMaxUp': b.hp += m; break;
+      case 'regen': b.regen += m; break;
+      case 'speedUp': b.speed *= m; break;
+      case 'cdDown': b.cd *= m; break;
+      case 'dmgTakenDown': b.taken *= m; break;
+      case 'dmgUp': b.dmg *= m; break;
+      case 'bulletCount': b.bullets += m; break;
+      case 'attackRangeUp': b.range *= m; break;
+      case 'pickupRangeUp': b.pickup *= m; break;
+      case 'pierceUp': b.pierce += m; break;
+      case 'ceGainUp': b.gain *= m; break;
+    }
+  }
+  return b;
 }
 
-export function heroMul(t: Traits, ext: Ext): number {
-  return ext.magic ? t.int : t.phy;
+// ---------------------------------------------------------------- helper items
+/** Rolls a helper item. `back` is 0 for the leader and 1 for last place: the further back, the stronger the draw. */
+export function rollItem(back: number, st: Stats = stats(), rnd: () => number = Math.random): Item {
+  const pool = ITEMS.filter((i) => !i.key || (st as unknown as Record<string, number>)[i.key] > 0);
+  const w = pool.map((i) => i.weight * Math.max(0.05, 1 + i.back * (back * 2 - 1) * 1.6));
+  let r = rnd() * w.reduce((a, c) => a + c, 0);
+  for (let i = 0; i < pool.length; i++) {
+    r -= w[i];
+    if (r <= 0) return pool[i];
+  }
+  return pool[0];
 }
 
-/** Bonus HP from worn gear. */
-export function armorHp(run: Run): number {
-  let hp = 0;
-  for (const s of run.slots) if (s.ext.kind === 'armor') hp += 10 * (s.lv + s.ext.rarity);
-  return hp;
-}
-export function armorRegen(run: Run): number {
-  let r = 0;
-  for (const s of run.slots) if (s.ext.kind === 'armor') r += 0.6 * s.lv;
-  return r;
-}
+// ---------------------------------------------------------------- the fighter (sky)
+const SKY_KIND: Record<string, Kind> = {
+  radial: 'shot', beam: 'shot', stack: 'slash', diagonal: 'slash', randomRadial: 'slash', bigHoming: 'magic', dropTarget: 'magic',
+  orbit: 'orbit', orbitClose: 'orbit', placeBomb: 'aura', speedUp: 'beast', cdDown: 'beast', hpMaxUp: 'armor', dmgTakenDown: 'armor', regen: 'armor',
+  dmgUp: 'shot', bulletCount: 'slash', attackRangeUp: 'magic', pierceUp: 'shot', pickupRangeUp: 'aura', ceGainUp: 'aura',
+};
+export const skyKind = (d: Def): Kind => SKY_KIND[d.arch] ?? 'shot';
+export const slotPower = (s: Slot) => 8 + s.lv * 11;
 
 /** The four best parts, used when the player does not choose. */
-export function autoFighter(run: Run): number[] {
-  return [...run.slots]
-    .sort((a, b) => slotPower(b) - slotPower(a))
-    .slice(0, 4)
-    .map((s) => s.ext.id);
+export function autoFighter(run: Run): string[] {
+  return [...run.slots].sort((a, b) => b.lv - a.lv).slice(0, 4).map((s) => s.def.id);
 }
-
 export interface FighterStats {
   laser: number; spread: number; missile: number; bits: number; engine: number; pulse: number; armor: number;
 }
-/** What the chosen parts add up to. Each value is "power" (0 = not fitted). */
 export function fighterStats(run: Run): FighterStats {
   const st: FighterStats = { laser: 0, spread: 0, missile: 0, bits: 0, engine: 0, pulse: 0, armor: 0 };
   const map: Record<Kind, keyof FighterStats> = {
     shot: 'laser', slash: 'spread', magic: 'missile', orbit: 'bits', beast: 'engine', aura: 'pulse', armor: 'armor',
   };
   for (const id of run.fighter) {
-    const s = run.slots.find((x) => x.ext.id === id);
-    if (s) st[map[s.ext.kind]] += slotPower(s);
+    const s = run.slots.find((x) => x.def.id === id);
+    if (s) st[map[skyKind(s.def)]] += slotPower(s);
   }
   return st;
 }

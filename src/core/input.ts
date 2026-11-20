@@ -213,3 +213,20 @@ export function pollInput(): void {
 }
 
 export const keyDown = (code: string) => keys.has(code);
+
+// Helper items: keys 1-3 (or Q / E), or a tap on the item itself in the HUD.
+let itemPress = -1;
+export function pressItem(i: number): void {
+  itemPress = i;
+}
+/** The item slot the player just asked to use (-1 when none). Reading it clears it. */
+export function takeItemPress(): number {
+  const i = itemPress;
+  itemPress = -1;
+  return i;
+}
+if (typeof window !== 'undefined') window.addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+  const map: Record<string, number> = { Digit1: 0, Digit2: 1, Digit3: 2, KeyQ: 0, KeyE: 1 };
+  if (e.code in map) itemPress = map[e.code];
+});

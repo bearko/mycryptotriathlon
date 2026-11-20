@@ -3,13 +3,13 @@
 
 import { greyOf, img, ready, whiteOf } from '../core/assets';
 import { sample, sfx } from '../core/audio';
-import { cat, KIND_COLOR, RARITY_COLOR, traitsOf, type Ext, type Hero, type Traits } from '../core/catalog';
+import { cat, traitsOf, type Hero, type Traits } from '../core/catalog';
 import { earn, stats, type Stats } from '../game/meta';
 import { input } from '../core/input';
 import { clamp, dist2, TAU, type Rng, makeRng } from '../core/util';
-import {
-  addXp, armorHp, armorRegen, DOWN_PENALTY, heroMul, levelMul, slotPower, takeExt, type Run, type Slot,
-} from '../game/run';
+import { addXp, boostsOf, DOWN_PENALTY, levelMul, type Boosts, type Run } from '../game/run';
+import type { Item } from '../game/roster';
+import { Arsenal } from './weapons';
 import type { Host, Stage, StageResult } from './stage';
 
 export interface Enemy {
@@ -38,6 +38,8 @@ export interface Runner {
   /** Rivals: how fast they like to run, how hard their gear hits, how rough they play. */
   pace: number; dps: number; mood: number; laneY: number; think: number; atk: number; quota: number;
   strikeT: number; near: boolean; gate: number;
+  /** Helper items: reflecting, riding the dragon, and (rivals) the item in hand and when they will use it. */
+  mirror: number; dragon: number; item: Item | null; itemT: number;
 }
 /** A referee standing on the course. Fouls only count inside the circle they can see. */
 export interface Referee { x: number; y: number; r: number; homeY: number; t: number; alert: number }
@@ -47,22 +49,15 @@ export function makeRunner(art: Hero, me: boolean): Runner {
     speed: 190, regen: 0, moving: false, bob: Math.random() * 6, art, me, name: art.name,
     ko: 0, frozen: 0, fouls: 0, slow: 0, buffSpd: 0, buffDmg: 0, buffAmt: 0, decoy: 0, boost: 0, done: false, place: 0,
     pUsed: false, pCd: 2, pTick: 6 + Math.random() * 6,
-    pace: 180, dps: 20, mood: 0, laneY: 500, think: 0, atk: 0, quota: 0, strikeT: 0, near: true, gate: 0,
+    pace: 180, dps: 20, mood: 0, laneY: 500, think: 0, atk: 0, quota: 0, strikeT: 0, near: true, gate: 0, mirror: 0, dragon: 0, item: null, itemT: 0,
   };
 }
-export interface Shot {
-  x: number; y: number; vx: number; vy: number; r: number; dmg: number; pierce: number; life: number;
-  type: 'bullet' | 'orb' | 'beast' | 'harpoon';
-  url?: string; color: string; hit: Set<Enemy>; target: Enemy | null; blast: number; kb: number; ox: number; oy: number;
-}
 export interface EBullet { x: number; y: number; vx: number; vy: number; r: number; dmg: number; life: number; color: string }
-export interface Pickup { x: number; y: number; ext: Ext; t: number; taken: boolean }
 interface Gem { x: number; y: number; v: number; t: number }
 interface Part { x: number; y: number; vx: number; vy: number; life: number; max: number; color: string; size: number; g: number }
 interface Float { x: number; y: number; text: string; color: string; t: number; big: boolean }
 interface Arc { x: number; y: number; ang: number; r: number; t: number; color: string }
 interface Ring { x: number; y: number; r: number; max: number; t: number; color: string }
-interface WState { cd: number; ang: number }
 
 export const VH = 540;
 
@@ -89,15 +84,16 @@ export abstract class Arena implements Stage {
   strikeCd = 0;
   private started = false;
   enemies: Enemy[] = [];
-  shots: Shot[] = [];
+  arsenal = new Arsenal();
+  boosts: Boosts;
+  /** True while the player is choosing a level-up card: the whole race holds still. */
+  picking = false;
   ebullets: EBullet[] = [];
-  pickups: Pickup[] = [];
   gems: Gem[] = [];
   parts: Part[] = [];
   floats: Float[] = [];
   arcs: Arc[] = [];
   rings: Ring[] = [];
-  wstate = new Map<number, WState>();
   shake = 0;
   hitstop = 0;
   /** Draw a soft shadow under sprites (land) or not (sea). */
@@ -110,6 +106,7 @@ export abstract class Arena implements Stage {
     this.heroArt = this.run.heroes[heroIndex];
     this.traits = traitsOf(this.heroArt);
     this.st = stats();
+    this.boosts = boostsOf(this.run);
     this.hero = makeRunner(this.heroArt, true);
     this.rng = makeRng(host.seed + seedSalt);
     this.canvas = document.createElement('canvas');
@@ -122,9 +119,8 @@ export abstract class Arena implements Stage {
     h.maxHp = this.fullHp();
     h.hp = h.maxHp;
     h.speed = 160 * (0.86 + 0.14 * this.traits.agi) * this.st.speed;
-    h.regen = armorRegen(this.run) + this.st.regen;
+    h.regen = this.boosts.regen + this.st.regen;
     img(this.heroArt.img);
-    for (const s of this.run.slots) img(s.ext.img);
   }
 
   resize(): void {
@@ -152,7 +148,7 @@ export abstract class Arena implements Stage {
 
   /** Full life bar for this race (oxygen under the sea). */
   protected fullHp(): number {
-    return Math.round((100 * this.traits.hp + armorHp(this.run)) * this.st.hp);
+    return Math.round((100 * this.traits.hp + this.boosts.hp) * this.st.hp);
   }
 
   // ------------------------------------------------------------------ hooks for the race
@@ -163,6 +159,9 @@ export abstract class Arena implements Stage {
   /** True when a point is inside rock / outside the course. */
   protected blocked(_x: number, _y: number): boolean {
     return false;
+  }
+  isBlocked(x: number, y: number): boolean {
+    return this.blocked(x, y);
   }
   /** Moves a body, stopping at walls. */
   protected abstract moveBody(b: { x: number; y: number; r: number }, dx: number, dy: number): void;
@@ -180,7 +179,16 @@ export abstract class Arena implements Stage {
 
   // ------------------------------------------------------------------ update
   update(dt: number): void {
-    if (this.finished) return;
+    if (this.finished || this.picking) return;
+    if (this.run.pending > 0 && this.hero.ko <= 0) {
+      // a level-up: everything waits while a card is chosen
+      this.picking = true;
+      void this.host.pick(this.run).then(() => {
+        this.picking = false;
+        this.refresh();
+      });
+      return;
+    }
     if (this.hitstop > 0) {
       this.hitstop -= dt;
       return;
@@ -213,8 +221,7 @@ export abstract class Arena implements Stage {
     this.crowd();
     this.tick(dt);
     if (this.finished) return;
-    if (h.ko <= 0 && h.frozen <= 0) this.weapons(dt);
-    this.stepShots(dt);
+    this.arsenal.step(this, dt, h.ko <= 0 && h.frozen <= 0);
     this.stepEnemies(dt);
     this.stepBullets(dt);
     this.stepLoot(dt);
@@ -230,6 +237,11 @@ export abstract class Arena implements Stage {
     r.buffDmg = Math.max(0, r.buffDmg - dt);
     r.decoy = Math.max(0, r.decoy - dt);
     r.boost = Math.max(0, r.boost - dt);
+    r.mirror = Math.max(0, r.mirror - dt);
+    if (r.dragon > 0) {
+      r.dragon = Math.max(0, r.dragon - dt);
+      r.inv = Math.max(r.inv, 0.2);
+    }
     r.pCd = Math.max(0, r.pCd - dt);
     if (r.frozen > 0) r.frozen = Math.max(0, r.frozen - dt);
     if (r.ko > 0) {
@@ -478,7 +490,7 @@ export abstract class Arena implements Stage {
       if (Math.abs(mx) > 0.2) h.flip = mx > 0;
       h.bob += dt * 11;
     }
-    let sp = h.speed * (h.slow > 0 ? 0.6 + 0.4 * Math.min(1, this.st.grit) : 1) * (h.buffSpd > 0 ? 1.25 : 1) * (h.boost > 0 ? 1.4 : 1);
+    let sp = h.speed * this.boosts.speed * (h.slow > 0 ? 0.6 + 0.4 * Math.min(1, this.st.grit) : 1) * (h.buffSpd > 0 ? 1.25 : 1) * (h.boost > 0 ? 1.4 : 1) * (h.dragon > 0 ? 2.1 : 1);
     if (this.st.draft > 0 && this.drafting()) sp *= 1 + this.st.draft;
     if (h.dashT > 0) {
       h.dashT -= dt;
@@ -532,184 +544,6 @@ export abstract class Arena implements Stage {
     return best;
   }
 
-  private dmgOf(s: Slot): number {
-    return slotPower(s) * heroMul(this.traits, s.ext) * levelMul(this.run.level) * (this.hero.buffDmg > 0 ? 1 + this.hero.buffAmt : 1);
-  }
-
-  private weapons(dt: number): void {
-    const h = this.hero;
-    const cdMul = this.st.cd / (0.82 + 0.18 * this.traits.agi);
-    let fired = false;
-    for (const s of this.run.slots) {
-      const k = s.ext.kind;
-      if (k === 'armor') continue;
-      let w = this.wstate.get(s.ext.series);
-      if (!w) {
-        w = { cd: 0.3 + Math.random() * 0.4, ang: Math.random() * TAU };
-        this.wstate.set(s.ext.series, w);
-      }
-      const dmg = this.dmgOf(s);
-      const color = KIND_COLOR[k];
-      if (k === 'orbit') {
-        w.ang += dt * 3.3;
-        const n = 1 + Math.floor((s.lv + 1) / 2);
-        const R = 74 + s.lv * 4;
-        for (let i = 0; i < n; i++) {
-          const a = w.ang + (i / n) * TAU;
-          const ox = h.x + Math.cos(a) * R;
-          const oy = h.y + Math.sin(a) * R;
-          for (const e of this.enemies) {
-            if (e.dead || e.asleep || e.orbitCd > 0) continue;
-            if (dist2(ox, oy, e.x, e.y) < (e.r + 16) ** 2) {
-              e.orbitCd = 0.4;
-              this.hitEnemy(e, dmg * 0.75, (e.x - h.x) * 0.5, (e.y - h.y) * 0.5);
-            }
-          }
-          for (const b of this.ebullets) if (dist2(ox, oy, b.x, b.y) < 20 * 20) b.life = 0;
-        }
-        continue;
-      }
-      w.cd -= dt;
-      if (w.cd > 0) continue;
-      if (k === 'slash') {
-        const R = 92 + s.lv * 8;
-        const t = this.nearest(h.x, h.y, R + 40);
-        if (!t) {
-          w.cd = 0.12;
-          continue;
-        }
-        const ang = Math.atan2(t.y - h.y, t.x - h.x);
-        for (const e of this.enemies) {
-          if (e.dead || e.asleep) continue;
-          const d = Math.hypot(e.x - h.x, e.y - h.y);
-          if (d > R + e.r) continue;
-          let da = Math.atan2(e.y - h.y, e.x - h.x) - ang;
-          da = Math.atan2(Math.sin(da), Math.cos(da));
-          if (Math.abs(da) < 1.15 || d < e.r + 24) this.hitEnemy(e, dmg * 1.6, Math.cos(ang) * 90, Math.sin(ang) * 90);
-        }
-        this.arcs.push({ x: h.x, y: h.y, ang, r: R, t: 0, color });
-        sfx('slash', 0.08);
-        fired = true;
-        w.cd = 0.85 * cdMul;
-      } else if (k === 'shot') {
-        const t = this.nearest(h.x, h.y, 540);
-        if (!t) {
-          w.cd = 0.12;
-          continue;
-        }
-        const n = 1 + (s.lv >= 3 ? 1 : 0) + (s.lv >= 5 ? 1 : 0);
-        const base = Math.atan2(t.y - h.y, t.x - h.x);
-        for (let i = 0; i < n; i++) {
-          const a = base + (i - (n - 1) / 2) * 0.14;
-          this.shots.push({
-            x: h.x, y: h.y, vx: Math.cos(a) * 740, vy: Math.sin(a) * 740, r: 7, dmg, pierce: Math.floor(s.lv / 2),
-            life: 0.75, type: 'bullet', color, hit: new Set(), target: null, blast: 0, kb: 40, ox: h.x, oy: h.y,
-          });
-        }
-        sfx('shot', 0.07);
-        w.cd = 0.5 * cdMul;
-      } else if (k === 'magic') {
-        const t = this.nearest(h.x, h.y, 600);
-        if (!t) {
-          w.cd = 0.12;
-          continue;
-        }
-        const n = 1 + (s.lv >= 4 ? 1 : 0);
-        for (let i = 0; i < n; i++) {
-          const a = Math.atan2(t.y - h.y, t.x - h.x) + (i ? 0.6 : 0) + (Math.random() - 0.5) * 0.3;
-          this.shots.push({
-            x: h.x, y: h.y, vx: Math.cos(a) * 390, vy: Math.sin(a) * 390, r: 10, dmg: dmg * 1.25, pierce: 0,
-            life: 2, type: 'orb', color, hit: new Set(), target: t, blast: 50 + s.lv * 6, kb: 30, ox: h.x, oy: h.y,
-          });
-        }
-        sfx('magic', 0.1);
-        w.cd = 1.05 * cdMul;
-      } else if (k === 'beast') {
-        const t = this.nearest(h.x, h.y, 520);
-        if (!t) {
-          w.cd = 0.2;
-          continue;
-        }
-        const a = Math.atan2(t.y - h.y, t.x - h.x);
-        this.shots.push({
-          x: h.x - Math.cos(a) * 30, y: h.y - Math.sin(a) * 30, vx: Math.cos(a) * 640, vy: Math.sin(a) * 640, r: 30,
-          dmg: dmg * 2.2, pierce: 99, life: 1.1, type: 'beast', url: s.ext.img, color, hit: new Set(), target: null,
-          blast: 0, kb: 220, ox: h.x, oy: h.y,
-        });
-        sfx('beast', 0.15);
-        w.cd = (2.7 - s.lv * 0.22) * cdMul;
-      } else if (k === 'aura') {
-        const R = 118 + s.lv * 13;
-        let any = false;
-        for (const e of this.enemies) {
-          if (e.dead || e.asleep) continue;
-          if (dist2(h.x, h.y, e.x, e.y) < (R + e.r) ** 2) {
-            any = true;
-            this.hitEnemy(e, dmg * 0.9, 0, 0);
-            e.slow = 1.2;
-          }
-        }
-        for (const b of this.ebullets) if (dist2(h.x, h.y, b.x, b.y) < R * R) b.life = 0;
-        if (!any) {
-          w.cd = 0.25;
-          continue;
-        }
-        this.rings.push({ x: h.x, y: h.y, r: 10, max: R, t: 0, color });
-        sfx('aura', 0.12);
-        fired = true;
-        w.cd = 1.7 * cdMul;
-      }
-    }
-    // "after using an active skill": the gear going off is this game's active skill
-    if (fired) this.passive(h, 'skill');
-  }
-
-  private stepShots(dt: number): void {
-    const view = this.vw * 0.75 + 200;
-    for (const s of this.shots) {
-      s.life -= dt;
-      if (s.type === 'orb' && s.target) {
-        if (s.target.dead) s.target = this.nearest(s.x, s.y, 400);
-        if (s.target) {
-          const a = Math.atan2(s.target.y - s.y, s.target.x - s.x);
-          const sp = Math.hypot(s.vx, s.vy) + 500 * dt;
-          const cur = Math.atan2(s.vy, s.vx);
-          let da = a - cur;
-          da = Math.atan2(Math.sin(da), Math.cos(da));
-          const na = cur + clamp(da, -7 * dt, 7 * dt);
-          s.vx = Math.cos(na) * sp;
-          s.vy = Math.sin(na) * sp;
-        }
-      }
-      s.x += s.vx * dt;
-      s.y += s.vy * dt;
-      if (s.type !== 'beast' && this.blocked(s.x, s.y)) {
-        s.life = 0;
-        this.puff(s.x, s.y, s.color, 3);
-        continue;
-      }
-      if (Math.abs(s.x - this.hero.x) > view + 300) s.life = 0;
-      for (const e of this.enemies) {
-        if (e.dead || e.asleep || s.hit.has(e)) continue;
-        if (dist2(s.x, s.y, e.x, e.y) < (s.r + e.r) ** 2) {
-          s.hit.add(e);
-          const sp = Math.hypot(s.vx, s.vy) || 1;
-          if (s.blast > 0) {
-            this.blast(s.x, s.y, s.blast, s.dmg, s.color);
-            s.life = 0;
-            break;
-          }
-          this.hitEnemy(e, s.dmg, (s.vx / sp) * s.kb, (s.vy / sp) * s.kb);
-          if (s.pierce-- <= 0) {
-            s.life = 0;
-            break;
-          }
-        }
-      }
-    }
-    this.shots = this.shots.filter((s) => s.life > 0);
-  }
-
   blast(x: number, y: number, r: number, dmg: number, color: string): void {
     for (const e of this.enemies) {
       if (e.dead || e.asleep) continue;
@@ -748,6 +582,7 @@ export abstract class Arena implements Stage {
       return;
     }
     this.run.kills += 1;
+    this.run.gum += Math.max(1, Math.round((1 + e.xp * 0.7) * this.st.gum * this.boosts.gain));
     this.puff(e.x, e.y, '#ffffff', e.boss ? 40 : e.elite ? 18 : 7);
     this.puff(e.x, e.y, '#ffb35c', e.boss ? 30 : 4);
     if (e.boss || e.elite) {
@@ -771,7 +606,7 @@ export abstract class Arena implements Stage {
   hurtHero(dmg: number, fromX?: number, fromY?: number, by?: Runner): void {
     const h = this.hero;
     if (h.inv > 0 || h.ko > 0 || this.finished) return;
-    h.hp -= dmg * this.st.guard;
+    h.hp -= dmg * this.st.guard * this.boosts.taken;
     h.inv = 0.7;
     this.shake = Math.max(this.shake, 8);
     sfx('hurt');
@@ -1057,58 +892,50 @@ export abstract class Arena implements Stage {
 
   private stepLoot(dt: number): void {
     const h = this.hero;
+    const reach = 130 * this.st.magnet * this.boosts.pickup;
     for (const g of this.gems) {
       g.t += dt;
       const d2 = dist2(g.x, g.y, h.x, h.y);
-      if (h.ko <= 0 && (d2 < (130 * this.st.magnet) ** 2 || g.t > 6)) {
+      if (h.ko <= 0 && (d2 < reach * reach || g.t > 5)) {
         const d = Math.sqrt(d2) || 1;
-        const sp = 520 + g.t * 200;
+        const sp = 560 + g.t * 220 + Math.abs(h.vx);
         g.x += ((h.x - g.x) / d) * sp * dt;
         g.y += ((h.y - g.y) / d) * sp * dt;
       }
-      if (d2 < 24 * 24) {
-        g.v = -g.v;
+      if (d2 < 26 * 26) {
+        const v = g.v;
+        g.v = 0;
         sfx('gem', 0.03);
-        if (addXp(this.run, -g.v * this.st.xp)) this.levelUp();
+        if (addXp(this.run, v * this.st.xp * this.boosts.gain)) this.levelUp();
       }
     }
     this.gems = this.gems.filter((g) => g.v > 0);
-    for (const p of this.pickups) {
-      p.t += dt;
-      if (!p.taken && h.ko <= 0 && dist2(p.x, p.y, h.x, h.y) < 40 * 40) {
-        p.taken = true;
-        this.gain(p.ext, p.x, p.y);
-      }
-    }
-    this.pickups = this.pickups.filter((p) => !p.taken);
   }
 
   protected levelUp(): void {
     const h = this.hero;
-    h.hp = Math.min(h.maxHp, h.hp + h.maxHp * 0.12);
+    h.hp = Math.min(h.maxHp, h.hp + h.maxHp * 0.1);
     sfx('levelup');
     this.floats.push({ x: h.x, y: h.y - 50, text: `LEVEL ${this.run.level}`, color: '#7dffb0', t: 0, big: true });
     this.rings.push({ x: h.x, y: h.y, r: 10, max: 90, t: 0, color: '#7dffb0' });
   }
 
-  /** Takes a piece of gear and tells the player what it became. */
-  gain(ext: Ext, x: number, y: number): void {
-    const res = takeExt(this.run, ext);
-    img(res.slot.ext.img);
+  /** Re-reads what the carried boosts add up to (after a card is taken). */
+  refresh(): void {
     const h = this.hero;
-    const extra = this.fullHp() - h.maxHp;
-    if (extra > 0) {
-      h.maxHp += extra;
-      h.hp += extra;
-    }
-    h.regen = armorRegen(this.run) + this.st.regen;
-    sfx('pickup');
-    sample('buff', 0.35);
-    const label = res.kind === 'new' ? 'GET!' : res.kind === 'up' ? `Lv${res.slot.lv}` : 'MAX';
-    this.floats.push({ x, y: y - 30, text: `${res.slot.ext.seriesName} ${label}`, color: RARITY_COLOR[ext.rarity], t: 0, big: true });
-    this.rings.push({ x, y, r: 6, max: 60, t: 0, color: RARITY_COLOR[ext.rarity] });
-    this.host.hud.slots(this.run.slots, res.slot);
+    this.boosts = boostsOf(this.run);
+    const full = this.fullHp();
+    if (full > h.maxHp) h.hp += full - h.maxHp;
+    h.maxHp = full;
+    h.regen = this.st.regen + this.boosts.regen;
+    this.host.hud.slots(this.run.slots);
   }
+
+  /** A free card (a treasure chest, a relic): the same pick as a level-up, without the level. */
+  grant(n = 1): void {
+    this.run.pending += n;
+  }
+
 
   puff(x: number, y: number, color: string, n: number, g = 0): void {
     if (this.parts.length > 400) return;
@@ -1215,23 +1042,6 @@ export abstract class Arena implements Stage {
       if (!seen(gm.x, gm.y)) continue;
       if (ready(ce)) g.drawImage(ce, gm.x - 9, gm.y - 9, 18, 18);
     }
-    for (const p of this.pickups) {
-      if (!seen(p.x, p.y)) continue;
-      const bob = Math.sin(p.t * 4) * 4;
-      g.globalAlpha = 0.28 + Math.sin(p.t * 6) * 0.08;
-      g.fillStyle = RARITY_COLOR[p.ext.rarity];
-      g.beginPath();
-      g.arc(p.x, p.y + 4, 30, 0, TAU);
-      g.fill();
-      g.globalAlpha = 1;
-      g.strokeStyle = KIND_COLOR[p.ext.kind];
-      g.lineWidth = 3;
-      g.beginPath();
-      g.arc(p.x, p.y + 4, 30, p.t * 2, p.t * 2 + 4.4);
-      g.stroke();
-      this.sprite(g, p.ext.img, p.x, p.y + bob, 48, false);
-    }
-
     // rings & arcs under the bodies
     for (const r of this.rings) {
       const k = r.t / 0.35;
@@ -1317,18 +1127,7 @@ export abstract class Arena implements Stage {
     this.drawHero(g, blink);
     this.mark(g, h);
 
-    // orbiting gear
-    for (const s of this.run.slots) {
-      if (s.ext.kind !== 'orbit') continue;
-      const w = this.wstate.get(s.ext.series);
-      if (!w) continue;
-      const n = 1 + Math.floor((s.lv + 1) / 2);
-      const R = 74 + s.lv * 4;
-      for (let i = 0; i < n; i++) {
-        const a = w.ang + (i / n) * TAU;
-        this.sprite(g, s.ext.img, h.x + Math.cos(a) * R, h.y + Math.sin(a) * R, 34, false);
-      }
-    }
+    this.arsenal.draw(this, g);
 
     // slashes
     for (const a of this.arcs) {
@@ -1346,58 +1145,6 @@ export abstract class Arena implements Stage {
       g.stroke();
     }
     g.globalAlpha = 1;
-
-    // the player's shots
-    for (const s of this.shots) {
-      if (s.type === 'beast' && s.url) {
-        g.globalAlpha = 0.35;
-        this.sprite(g, s.url, s.x - s.vx * 0.04, s.y - s.vy * 0.04, 64, s.vx > 0);
-        g.globalAlpha = 1;
-        this.sprite(g, s.url, s.x, s.y, 72, s.vx > 0);
-      } else if (s.type === 'harpoon') {
-        g.strokeStyle = 'rgba(255,255,255,0.35)';
-        g.lineWidth = 1.5;
-        g.beginPath();
-        g.moveTo(h.x, h.y);
-        g.lineTo(s.x, s.y);
-        g.stroke();
-        const sp = Math.hypot(s.vx, s.vy) || 1;
-        g.strokeStyle = '#e9f6ff';
-        g.lineWidth = 4;
-        g.beginPath();
-        g.moveTo(s.x - (s.vx / sp) * 26, s.y - (s.vy / sp) * 26);
-        g.lineTo(s.x, s.y);
-        g.stroke();
-      } else if (s.type === 'orb') {
-        g.fillStyle = s.color;
-        g.globalAlpha = 0.35;
-        g.beginPath();
-        g.arc(s.x, s.y, s.r + 6, 0, TAU);
-        g.fill();
-        g.globalAlpha = 1;
-        g.beginPath();
-        g.arc(s.x, s.y, s.r, 0, TAU);
-        g.fill();
-        g.fillStyle = '#fff';
-        g.beginPath();
-        g.arc(s.x, s.y, s.r * 0.45, 0, TAU);
-        g.fill();
-      } else {
-        const sp = Math.hypot(s.vx, s.vy) || 1;
-        g.strokeStyle = s.color;
-        g.lineWidth = 5;
-        g.beginPath();
-        g.moveTo(s.x - (s.vx / sp) * 18, s.y - (s.vy / sp) * 18);
-        g.lineTo(s.x, s.y);
-        g.stroke();
-        g.strokeStyle = '#fff';
-        g.lineWidth = 2;
-        g.beginPath();
-        g.moveTo(s.x - (s.vx / sp) * 8, s.y - (s.vy / sp) * 8);
-        g.lineTo(s.x, s.y);
-        g.stroke();
-      }
-    }
 
     // enemy shots: always the brightest thing on the screen
     for (const b of this.ebullets) {
@@ -1469,6 +1216,14 @@ export abstract class Arena implements Stage {
       g.lineWidth = 2;
       g.beginPath();
       g.arc(r.x, r.y, 26, 0, TAU * (r.frozen / 3));
+      g.stroke();
+    } else if (r.dragon > 0) {
+      this.sprite(g, cat.extArt['3117'].img, r.x, r.y + 22, 72, r.flip);
+    } else if (r.mirror > 0) {
+      g.strokeStyle = 'rgba(160,230,255,0.9)';
+      g.lineWidth = 3;
+      g.beginPath();
+      g.arc(r.x, r.y, 30, this.time * 4, this.time * 4 + 4.5);
       g.stroke();
     } else if (r.buffDmg > 0) {
       g.strokeStyle = 'rgba(255,120,90,0.8)';

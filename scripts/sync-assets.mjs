@@ -137,6 +137,15 @@ const exts = readJson('Data/Extensions/extensions.json')
     img: use(e.image_file_path),
   }));
 
+// ---------------------------------------------------------------- every extension image and name, by id
+// The gear that fights (src/game/roster.ts) and the helper items name their art by extension id.
+const extArt = {};
+for (const e of readJson('Data/Extensions/extensions.json')) {
+  if (e.category === 'replica' || !RARITIES.includes(e.rarity?.name)) continue;
+  if (!existsSync(join(src, e.image_file_path))) continue;
+  extArt[e.id] = { name: e.name.ja, img: kindOf.has(e.series?.id) ? `mch/${e.image_file_path}` : use(e.image_file_path) };
+}
+
 // ---------------------------------------------------------------- enemies
 const enemyNames = new Map();
 for (const e of readJson('Data/Enemies/enemies.json')) {
@@ -178,6 +187,7 @@ for (const [key, ids] of Object.entries(ENEMY_SETS)) {
 const catalog = {
   heroes,
   exts,
+  extArt,
   enemies,
   bg: {
     title: use('Image/Backgrounds/1046.png'),

@@ -1,9 +1,8 @@
 // Everything outside the races: title, relay line-up, the cards between races, the hangar, the result.
 
 import { sample, sfx, unlockAudio } from '../core/audio';
-import {
-  cat, KIND_COLOR, KIND_LABEL, KIND_SKY, RARITY_COLOR, RARITY_NAME, traitsOf, type Hero,
-} from '../core/catalog';
+import { cat, KIND_SKY, RARITY_COLOR, traitsOf, type Hero } from '../core/catalog';
+import { iconOf, nameOf, type Def } from '../game/roster';
 import { input } from '../core/input';
 import { commit, save } from '../core/save';
 import { meta } from '../game/meta';
@@ -11,7 +10,7 @@ import type { Payout } from '../game/reward';
 import type { StageResult } from '../stages/stage';
 import { fmtDelta, fmtTime } from '../core/util';
 import {
-  autoFighter, fighterStats, STAGE_EN, STAGE_NAME, STAGES, totalTime, type Run, type StageId,
+  autoFighter, drawCards, fighterStats, maxLvOf, skyKind, STAGE_EN, STAGE_NAME, STAGES, takeCard, totalTime, type Run, type StageId,
 } from '../game/run';
 
 let layer: HTMLElement;
@@ -40,9 +39,9 @@ const stars = (n: number) => '★'.repeat(n) + '<i>' + '★'.repeat(5 - n) + '</
 
 const RULES: Record<StageId, { goal: string; pc: string; touch: string }> = {
   land: {
-    goal: '50組中、30位以内でゴールせよ。関門では番人に規定のダメージを与えると通過できる',
-    pc: '移動 WASD ／ ダッシュ Space（体当たりは反則なし） ／ ストライク Shift（審判の円の中でライバルに当てると反則）',
-    touch: '左スティックで移動 ／ A ダッシュ（体当たり） ／ B ストライク（審判の円の中では反則）',
+    goal: '50組中、30位以内でゴールせよ。敵を倒してレベルを上げ、関門の番人に規定のダメージを与えて通過',
+    pc: '前へは自動。W・S で上下 ／ Space ダッシュ ／ Shift ストライク（審判の円の中は反則） ／ 1・2 お助けエクステンション',
+    touch: '前へは自動。スティックで上下 ／ A ダッシュ ／ B ストライク（審判の円の中は反則） ／ 右上のアイコンでお助けエクステンション',
   },
   sea: {
     goal: '遺物を掘り出して門を開き、深海の主を倒して秘宝を手に入れろ',
@@ -327,7 +326,7 @@ export function hangarScreen(run: Run, quick: boolean): Promise<void> {
   const parts = el.querySelector<HTMLElement>('#g-parts')!;
   const specs = el.querySelector<HTMLElement>('#g-specs')!;
   const paint = () => {
-    const picked = run.fighter.map((id) => run.slots.find((s) => s.ext.id === id)!).filter(Boolean);
+    const picked = run.fighter.map((id) => run.slots.find((s) => s.def.id === id)!).filter(Boolean);
     ship.innerHTML = `
       <svg viewBox="0 0 200 150" class="hull" aria-hidden="true">
         <polygon points="100,8 118,70 100,128 82,70" fill="#e8eef7"/>
@@ -340,14 +339,14 @@ export function hangarScreen(run: Run, quick: boolean): Promise<void> {
       <img class="pilot" src="${pilot.img}" alt="">
       ${[0, 1, 2, 3].map((i) => {
         const s = picked[i];
-        return `<div class="hard hp${i}${s ? ' set' : ''}" style="${s ? `--rar:${RARITY_COLOR[s.ext.rarity]}` : ''}">${s ? `<img src="${s.ext.img}" alt="">` : ''}</div>`;
+        return `<div class="hard hp${i}${s ? ' set' : ''}" style="${s ? `--rar:${RARITY_COLOR[s.lv]}` : ''}">${s ? `<img src="${iconOf(s.def, s.lv)}" alt="">` : ''}</div>`;
       }).join('')}`;
     parts.innerHTML = run.slots.map((s) => {
-      const on = run.fighter.includes(s.ext.id);
-      return `<button class="part${on ? ' on' : ''}" data-id="${s.ext.id}" style="--rar:${RARITY_COLOR[s.ext.rarity]};--kind:${KIND_COLOR[s.ext.kind]}">
-        <img src="${s.ext.img}" alt="">
-        <span class="pn">${s.ext.seriesName}<small>Lv${s.lv}・${RARITY_NAME[s.ext.rarity]}</small></span>
-        <span class="pk">${KIND_SKY[s.ext.kind]}</span>
+      const on = run.fighter.includes(s.def.id);
+      return `<button class="part${on ? ' on' : ''}" data-id="${s.def.id}" style="--rar:${RARITY_COLOR[s.lv]};--kind:${s.def.color}">
+        <img src="${iconOf(s.def, s.lv)}" alt="">
+        <span class="pn">${nameOf(s.def, s.lv)}<small>Lv${s.lv}</small></span>
+        <span class="pk">${KIND_SKY[skyKind(s.def)]}</span>
       </button>`;
     }).join('') || '<p class="none">エクステンションなし（基本のレーザーだけで飛びます）</p>';
     const st = fighterStats(run);
@@ -363,7 +362,7 @@ export function hangarScreen(run: Run, quick: boolean): Promise<void> {
   parts.addEventListener('click', (e) => {
     const b = (e.target as HTMLElement).closest<HTMLElement>('.part');
     if (!b) return;
-    const id = Number(b.dataset.id);
+    const id = b.dataset.id!;
     const at = run.fighter.indexOf(id);
     if (at >= 0) {
       run.fighter.splice(at, 1);
@@ -425,7 +424,7 @@ export function resultScreen(run: Run, pay?: Payout): Promise<After> {
       <p class="vs">${prev !== null ? `これまでのベスト ${fmtTime(prev)}（${fmtDelta(total - prev)}）` : '&nbsp;'}</p>
       <ul class="splits">${rows}</ul>
       <p class="meta">撃破 ${run.kills} ／ ダウン ${run.downs}（+${(run.downs * 8).toFixed(0)}秒） ／ チーム Lv${run.level}</p>
-      <div class="gear">${run.slots.map((sl) => `<span style="--rar:${RARITY_COLOR[sl.ext.rarity]}" title="${sl.ext.name}（${KIND_LABEL[sl.ext.kind]}）"><img src="${sl.ext.img}" alt=""><b>Lv${sl.lv}</b></span>`).join('')}</div>
+      <div class="gear">${run.slots.map((sl) => `<span style="--rar:${RARITY_COLOR[sl.lv]}" title="${nameOf(sl.def, sl.lv)}"><img src="${iconOf(sl.def, sl.lv)}" alt=""><b>Lv${sl.lv}</b></span>`).join('')}</div>
       ${pay ? `<p class="earn"><img src="${cat.icons.ce}" alt=""> CE +${pay.total}${pay.feats.length ? ` ／ 🏅 メダル +${pay.feats.length}` : ''}</p>` : ''}
       <footer>
         <button class="btn big" id="r-retry">スキルツリーへ</button>
@@ -496,6 +495,82 @@ export function outScreen(stage: StageId, res: StageResult, pay: Payout): Promis
       sfx('ui');
       close(el);
       r();
+    });
+  });
+}
+
+// ------------------------------------------------------------------ level up
+/** Three cards (or four); one is taken. The race holds still meanwhile. Keys 1-4 also pick. */
+export function levelUpScreen(run: Run, auto: boolean): Promise<void> {
+  const shown = new Set<string>();
+  let cards = drawCards(run);
+  if (!cards.length) {
+    run.pending = Math.max(0, run.pending - 1);
+    return Promise.resolve();
+  }
+  if (auto) {
+    takeCard(run, cards.find((c) => c.weapon) ?? cards[0]);
+    run.pending = Math.max(0, run.pending - 1);
+    return Promise.resolve();
+  }
+  sample('chest', 0.5);
+  const el = open('levelup', '<div class="lu-box"><p class="lu-head"></p><div class="lu-cards"></div><div class="lu-foot"></div></div>');
+  const head = el.querySelector<HTMLElement>('.lu-head')!;
+  const box = el.querySelector<HTMLElement>('.lu-cards')!;
+  const foot = el.querySelector<HTMLElement>('.lu-foot')!;
+  const max = maxLvOf();
+  const paint = () => {
+    head.innerHTML = `<b>LEVEL UP!</b> チーム Lv${run.level}　エクステンションを 1 つ選ぶ`;
+    box.innerHTML = cards.map((d: Def, i) => {
+      const own = run.slots.find((s) => s.def === d);
+      const next = (own?.lv ?? 0) + 1;
+      const t = d.tiers[next - 1];
+      return `<button class="lu-card ${d.weapon ? 'weapon' : 'boost'}" data-i="${i}" style="--c:${d.color};--rar:${RARITY_COLOR[next]};animation-delay:${i * 70}ms">
+        <span class="lu-tag">${own ? `Lv${own.lv} → <b>Lv${next}${next >= max ? ' MAX' : ''}</b>` : '<b>NEW</b>'}</span>
+        <img src="${iconOf(d, next)}" alt="">
+        <span class="lu-name">${nameOf(d, next)}</span>
+        <span class="lu-kind">${d.weapon ? '武器' : '強化'}・${d.skill}</span>
+        <span class="lu-desc">${d.desc(t)}</span>
+        <kbd>${i + 1}</kbd>
+      </button>`;
+    }).join('');
+    foot.innerHTML = run.rerolls > 0 ? `<button class="btn ghost small" id="lu-re">引き直す（あと ${run.rerolls} 回）</button>` : '';
+  };
+  paint();
+  return new Promise((res) => {
+    let done = false;
+    const pick = (i: number) => {
+      if (done || !cards[i]) return;
+      done = true;
+      window.removeEventListener('keydown', onKey);
+      takeCard(run, cards[i]);
+      run.pending = Math.max(0, run.pending - 1);
+      sfx('levelup');
+      sample('buff', 0.5);
+      box.querySelector(`[data-i="${i}"]`)?.classList.add('picked');
+      window.setTimeout(() => {
+        close(el);
+        res();
+      }, 160);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      const i = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(e.code);
+      if (i >= 0) pick(i);
+    };
+    // a short guard so a key held for steering does not pick by accident
+    window.setTimeout(() => window.addEventListener('keydown', onKey), 250);
+    el.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      if (t.closest('#lu-re') && run.rerolls > 0) {
+        run.rerolls -= 1;
+        for (const c of cards) shown.add(c.id);
+        cards = drawCards(run, shown);
+        sfx('ui');
+        paint();
+        return;
+      }
+      const b = t.closest<HTMLElement>('.lu-card');
+      if (b) pick(Number(b.dataset.i));
     });
   });
 }

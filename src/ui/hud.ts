@@ -1,12 +1,15 @@
 // The in-race display. Plain DOM over the canvas, shared by all three races.
 // Top row: place and qualifying spots, the commentary booth, the clock.
 
-import { cat, KIND_COLOR, RARITY_COLOR } from '../core/catalog';
+import { cat, RARITY_COLOR } from '../core/catalog';
+import { pressItem } from '../core/input';
+import { iconOf, itemImg, type Item } from '../game/roster';
 import { fmtTime } from '../core/util';
 import { STAGE_EN, STAGE_NAME, type Slot, type StageId } from '../game/run';
 import type { Hud } from '../stages/stage';
 
 export interface HudView extends Hud {
+  items(list: Item[], max: number): void;
   el: HTMLElement;
   show(stage: StageId, splits: number[]): void;
   hide(): void;
@@ -42,9 +45,10 @@ export function createHud(root: HTMLElement): HudView {
     <div class="hud-vitals">
       <div class="gauge"><i id="h-gauge"></i><span id="h-gtext"></span></div>
       <div class="gauge sub" id="h-subwrap"><i id="h-sub"></i></div>
-      <div class="lv"><span id="h-lv">Lv1</span><div class="xp"><i id="h-xp"></i></div></div>
+      <div class="lv"><span id="h-lv">Lv1</span><div class="xp"><i id="h-xp"></i></div><span class="gum"><img src="${cat.icons.gum}" alt=""><b id="h-gum">0</b></span></div>
       <div class="fouls" id="h-fouls"></div>
     </div>
+    <div class="hud-items" id="h-items"></div>
     <div class="hud-boss" id="h-boss"><span id="h-bname"></span><div class="bbar"><i id="h-bbar"></i></div></div>
     <div class="hud-obj" id="h-obj"></div>
     <div class="hud-slots" id="h-slots"></div>
@@ -83,6 +87,17 @@ export function createHud(root: HTMLElement): HudView {
   const castImg = $<HTMLImageElement>('h-castimg');
   const castLine = $('h-castline');
   const cutin = $('h-cutin');
+  const gumEl = $('h-gum');
+  const itemsEl = $('h-items');
+  let lastGum = -1;
+  itemsEl.addEventListener('pointerdown', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>('.item');
+    if (b) {
+      e.preventDefault();
+      e.stopPropagation();
+      pressItem(Number(b.dataset.i));
+    }
+  });
 
   let lastG = -1;
   let lastGT = '';
@@ -148,6 +163,8 @@ export function createHud(root: HTMLElement): HudView {
       field.textContent = '';
       quota.textContent = '';
       foulsEl.innerHTML = '';
+      itemsEl.innerHTML = '';
+      lastGum = -1;
       dotsEl.innerHTML = '';
       dotEls = [];
       queue.length = 0;
@@ -242,10 +259,21 @@ export function createHud(root: HTMLElement): HudView {
       slotsEl.innerHTML = slots
         .map(
           (s) =>
-            `<div class="slot${s === changed ? ' pop' : ''}" style="--rar:${RARITY_COLOR[s.ext.rarity]};--kind:${KIND_COLOR[s.ext.kind]}">` +
-            `<img src="${s.ext.img}" alt=""><b>${s.lv >= 5 ? 'MAX' : `Lv${s.lv}`}</b></div>`,
+            `<div class="slot${s === changed ? ' pop' : ''}${s.def.weapon ? '' : ' boost'}" style="--rar:${RARITY_COLOR[s.lv]};--kind:${s.def.color}">` +
+            `<img src="${iconOf(s.def, s.lv)}" alt=""><b>${s.lv >= 5 ? 'MAX' : `Lv${s.lv}`}</b></div>`,
         )
         .join('');
+    },
+    gum(n) {
+      if (n === lastGum) return;
+      lastGum = n;
+      gumEl.textContent = String(n);
+    },
+    items(list, max) {
+      itemsEl.innerHTML = Array.from({ length: max }, (_, i) => {
+        const it = list[i];
+        return `<button class="item${it ? ' has' : ''}" data-i="${i}" aria-label="${it ? it.name : '空き'}">${it ? `<img src="${itemImg(it)}" alt=""><span>${it.name}</span>` : ''}<kbd>${i + 1}</kbd></button>`;
+      }).join('');
     },
     boss(name, frac = 0) {
       if (name !== lastBoss) {

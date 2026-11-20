@@ -3,11 +3,12 @@
 // Gear lies along the road, and everyone wants it.
 
 import { sample, sfx } from '../core/audio';
-import { cat, RARITY_NAME, type EnemyArt, type Hero } from '../core/catalog';
-import { input } from '../core/input';
+import { cat, type EnemyArt, type Hero } from '../core/catalog';
+import { input, pressItem, takeItemPress } from '../core/input';
 import { clamp, dist2, hash2, mixColor, TAU } from '../core/util';
 import { earn } from '../game/meta';
-import { rollExt, xpNeed } from '../game/run';
+import { rollItem, xpNeed } from '../game/run';
+import { itemImg, type Item } from '../game/roster';
 import { Arena, makeRunner, type Enemy, type Runner } from './arena';
 import type { Host } from './stage';
 
@@ -17,13 +18,15 @@ const BOTTOM = 930;
 export const FIELD = 50;
 export const QUOTA = 30;
 /** Rivals' cruising speed: the slowest and how much faster the best are. */
-const PACE_MIN = 205;
-const PACE_SPAN = 70;
+const PACE_MIN = 232;
+const PACE_SPAN = 74;
 
 interface Gate { x: number; boss: Enemy | null; art: EnemyArt; need: number; size: number; tier: number; first: boolean; passed: number }
 interface Decor { x: number; y: number; kind: number; s: number }
 interface Pad { x: number; y: number }
-interface Box { x: number; y: number; taken: boolean; t: number }
+interface Chest { x: number; y: number; taken: boolean; t: number }
+interface Roller { x: number; y: number; life: number; owner: Runner; rot: number }
+interface Trap { x: number; y: number; owner: Runner; t: number }
 
 const GROUND: [number, number, number][] = [[58, 122, 74], [156, 132, 78], [74, 62, 112]];
 const ROAD: [number, number, number][] = [[196, 176, 124], [206, 180, 130], [120, 108, 150]];
@@ -33,7 +36,9 @@ export class LandStage extends Arena {
   private gates: Gate[];
   private decor: Decor[] = [];
   private pads: Pad[] = [];
-  private boxes: Box[] = [];
+  private chests: Chest[] = [];
+  private rollers: Roller[] = [];
+  private traps: Trap[] = [];
   private spawnT = 1.2;
   private pattern: CanvasPattern | null = null;
   private passed = 0;
@@ -54,8 +59,8 @@ export class LandStage extends Arena {
     const L = this.len;
     const en = cat.enemies;
     this.gates = [
-      { x: Math.round(L / 3), boss: null, art: en.ghost[0], need: 600, size: 112, tier: 0, first: true, passed: 0 },
-      { x: Math.round((L * 2) / 3), boss: null, art: en.ghost[1], need: 1240, size: 124, tier: 1, first: true, passed: 0 },
+      { x: Math.round(L / 3), boss: null, art: en.ghost[0], need: 1000, size: 112, tier: 0, first: true, passed: 0 },
+      { x: Math.round((L * 2) / 3), boss: null, art: en.ghost[1], need: 3200, size: 124, tier: 1, first: true, passed: 0 },
       { x: L - 110, boss: null, art: en.landBoss[0], need: 2000, size: 176, tier: 2, first: true, passed: 0 },
     ];
     const h = this.hero;
@@ -72,7 +77,7 @@ export class LandStage extends Arena {
       const skill = i / (FIELD - 2);
       // the field is uneven on purpose: a pack in the middle, and a few teams far out in front
       r.pace = (PACE_MIN + PACE_SPAN * skill + 40 * skill ** 3 + (Math.random() - 0.5) * 10) * (1 + st.rival);
-      r.dps = 68 + 120 * skill + 160 * skill ** 3;
+      r.dps = 140 + 240 * skill + 330 * skill ** 3;
       r.mood = Math.random();
       r.maxHp = r.hp = 150;
       r.x = 70 + Math.random() * 190;
@@ -90,26 +95,19 @@ export class LandStage extends Arena {
       this.refs.push({ x, y: H / 2, r: 230, homeY: H / 2 + (i % 2 ? 130 : -130), t: i * 2.1, alert: 0 });
     });
 
-    // gear on the road: off the centre line, so taking it is a choice
-    const n = Math.round(17 * st.pickups * st.course);
+    // treasure-chest panels: step on one for a helper item. Off the centre line, so taking it is a choice
+    const n = Math.round(9 * st.chests * st.course);
     for (let i = 0; i < n; i++) {
-      const x = 340 + ((L - 700) / n) * i + (rng() - 0.5) * 160;
-      if (this.gates.some((gt) => Math.abs(gt.x - x) < 200)) continue;
-      const side = rng() < 0.5 ? -1 : 1;
-      const y = H / 2 + side * (110 + rng() * 260);
-      this.pickups.push({ x, y, ext: rollExt(this.run, rng, (x / L) * 0.5), t: rng() * 6, taken: false });
+      const x = 700 + ((L - 1500) / n) * i + (rng() - 0.5) * 200;
+      if (this.gates.some((gt) => Math.abs(gt.x - x) < 260)) continue;
+      const lanes = [-1, 0, 1].sort(() => rng() - 0.5).slice(0, 2);
+      for (const lane of lanes) this.chests.push({ x, y: H / 2 + lane * 250, taken: false, t: rng() * 5 });
     }
     // things the skill tree adds to the course
     if (st.pads) {
       for (let x = 700; x < L - 400; x += 760 + rng() * 300) {
         if (this.gates.some((gt) => Math.abs(gt.x - x) < 260)) continue;
         this.pads.push({ x, y: TOP + 90 + rng() * (BOTTOM - TOP - 180) });
-      }
-    }
-    if (st.items) {
-      for (let x = 1100; x < L - 500; x += 1150 + rng() * 400) {
-        if (this.gates.some((gt) => Math.abs(gt.x - x) < 260)) continue;
-        this.boxes.push({ x, y: TOP + 90 + rng() * (BOTTOM - TOP - 180), taken: false, t: rng() * 5 });
       }
     }
     for (let i = 0; i < 400; i++) {
@@ -139,8 +137,9 @@ export class LandStage extends Arena {
     }
 
     host.hud.slots(this.run.slots);
+    host.items(this.run);
     host.hud.fouls(0, st.foulLimit);
-    host.hud.objective(`30位以内でゴールせよ！ ／ ${input.touch ? 'B' : 'Shift'}：ストライク（審判の円の中でライバルに当てると反則）`);
+    host.hud.objective('自動で前へ走る。上下に動いて、30位以内でゴールせよ！');
     host.hud.say(`さあ始まりました、マイクリプト・トライアスロン！ ${FIELD}組が一斉にスタート！`, 3);
     host.hud.say(`通過できるのは上位${QUOTA}組だけ。関門の番人をどう抜けるかが鍵ですね`, 2, 'ain');
     this.follow(1);
@@ -189,7 +188,7 @@ export class LandStage extends Arena {
       hud.banner(gate.tier === 2 ? 'GOAL へ！' : '関門突破！', `${gate.passed}番目に通過`, 'good');
       hud.objective(gate.tier === 2 ? 'ゴールラインへ！' : '30位以内でゴールせよ！');
       earn(['gate1', 'gate2', 'gate3'][gate.tier]);
-      if (gate.tier < 2) this.pickups.push({ x: gate.x + 90, y: h.y, ext: rollExt(this.run, this.rng, 0.8), t: 0, taken: false });
+      this.grant(1);
     }
   }
 
@@ -201,6 +200,29 @@ export class LandStage extends Arena {
     if (!gate || gate.boss !== e) return;
     r.quota += dmg;
     if (r.quota >= gate.need) this.pass(r);
+  }
+
+  /** The hero runs forward on their own. The player steers up and down (and can ease off by holding back). */
+  protected heroControl(dt: number): void {
+    const h = this.hero;
+    const my = input.move.y;
+    const ease = input.move.x < -0.4 ? 0.5 : 1;
+    h.moving = true;
+    h.bob += dt * 11;
+    h.flip = true;
+    let sp = h.speed * this.boosts.speed * (h.slow > 0 ? 0.6 + 0.4 * Math.min(1, this.st.grit) : 1) * (h.buffSpd > 0 ? 1.25 : 1) * (h.boost > 0 ? 1.4 : 1) * (h.dragon > 0 ? 2.1 : 1);
+    if (this.st.draft > 0 && this.drafting()) sp *= 1 + this.st.draft;
+    h.fx = 1;
+    h.fy = 0;
+    if (h.dashT > 0) {
+      h.dashT -= dt;
+      h.vx = sp * 2.5;
+      if (Math.random() < 0.7) this.puff(h.x - 14, h.y + 10, '#ffffff', 1);
+    } else {
+      h.vx += (sp * ease - h.vx) * Math.min(1, dt * 10);
+    }
+    h.vy += (my * sp * 1.15 - h.vy) * Math.min(1, dt * 14);
+    this.moveBody(h, h.vx * dt, h.vy * dt);
   }
 
   protected tick(dt: number): void {
@@ -230,13 +252,26 @@ export class LandStage extends Arena {
         sfx('boost');
       }
     }
-    for (const b of this.boxes) {
-      b.t += dt;
-      if (!b.taken && h.ko <= 0 && dist2(b.x, b.y, h.x, h.y) < 38 * 38) {
-        b.taken = true;
-        this.useItem(h);
-      }
+    const back = (this.place - 1) / (FIELD - 1);
+    for (const c of this.chests) {
+      c.t += dt;
+      if (c.taken || h.ko > 0 || Math.abs(c.x - h.x) > 40 || Math.abs(c.y - h.y) > 44) continue;
+      if (this.run.items.length >= this.st.itemSlots) continue;
+      c.taken = true;
+      const it = rollItem(back, this.st);
+      this.run.items.push(it);
+      this.host.items(this.run);
+      sample('chest', 0.7);
+      this.floats.push({ x: h.x, y: h.y - 50, text: `${it.name} GET!`, color: '#ffe45c', t: 0, big: true });
+      hud.say(`${this.heroArt.name}、宝箱から「${it.name}」を手に入れた！`, 1, 'ain');
     }
+    const press = takeItemPress();
+    if (press >= 0 && press < this.run.items.length && h.ko <= 0 && h.frozen <= 0) {
+      const it = this.run.items.splice(press, 1)[0];
+      this.host.items(this.run);
+      this.useItem(h, it);
+    }
+    this.stepItems(dt);
 
     // the crowd of monsters: mostly ahead of the player, sometimes from behind
     this.spawnT -= dt;
@@ -330,6 +365,7 @@ export class LandStage extends Arena {
     hud.sub(1 - h.dashCd / (1.4 * this.st.dashCd));
     hud.progress(prog, this.gates.slice(0, 2).map((g) => g.x / L));
     hud.level(this.run.level, this.run.xp / xpNeed(this.run.level));
+    hud.gum(this.run.gum);
     const near = gate && h.x > gate.x - 620 ? gate : null;
     hud.boss(near ? `${near.art.name}に あと ${Math.max(0, Math.ceil(near.need - h.quota))} ダメージで通過` : null, near ? 1 - h.quota / near.need : 0);
     if (near && !this.told.has(`g${near.tier}`)) {
@@ -340,31 +376,115 @@ export class LandStage extends Arena {
     }
   }
 
-  private useItem(r: Runner): void {
+  /** Is this runner shielded by a mirror? (Says so when it matters.) */
+  private reflects(o: Runner, what: string): boolean {
+    if (o.mirror <= 0) return false;
+    if (o.me || o.near) this.host.hud.say(`${o.name}の鏡が${what}をはね返した！`, 2, 'ain');
+    return true;
+  }
+  /** Knocks a runner off their stride for a moment (an item's doing: never a foul). */
+  private trip(o: Runner, stun: number, slow: number): void {
+    if (o.inv > 0 && o.dragon > 0) return;
+    o.ko = Math.max(o.ko, stun);
+    o.slow = Math.max(o.slow, slow);
+    o.vx = o.vy = 0;
+    this.puff(o.x, o.y, '#ffe45c', 8);
+    if (o.me) {
+      this.shake = Math.max(this.shake, 8);
+      sfx('hurt');
+      this.host.hud.hurt();
+    }
+  }
+
+  private useItem(r: Runner, it: Item): void {
     const hud = this.host.hud;
     const pw = r.me ? this.st.itemPower : 1;
-    const roll = Math.random();
-    sample('chest', 0.6);
-    if (roll < 0.4) {
-      r.boost = Math.max(r.boost, 3.2 * pw);
-      r.inv = Math.max(r.inv, 2 * pw);
-      if (r.me || r.near) hud.say(`${r.name}、スターを引いた！ 一気に加速！`, r.me ? 2 : 1);
-    } else if (roll < 0.75) {
-      // lightning: everyone ahead stumbles. An item is fair play, so no foul
-      let n = 0;
-      for (const o of [this.hero, ...this.rivals]) {
-        if (o === r || o.done || o.ko > 0 || o.x < r.x || o.x > r.x + 1100) continue;
-        o.slow = Math.max(o.slow, 2.2 * pw);
-        n++;
-      }
-      sfx('boom');
-      this.shake = Math.max(this.shake, 6);
-      hud.say(`${r.name}の雷！ 前を行く${n}組の足が止まった！`, 2);
-    } else {
-      r.decoy = 6 * pw;
-      if (r.me || r.near) hud.say(`${r.name}、おとりを使った！ エネミーがまわりのヒーローへ向かう！`, r.me ? 2 : 1, 'ain');
+    const loud = r.me ? 2 : 1;
+    if (r.me) {
+      sample('buff', 0.6);
+      this.rings.push({ x: r.x, y: r.y, r: 10, max: 120, t: 0, color: '#ffe45c' });
     }
-    if (r.me) this.rings.push({ x: r.x, y: r.y, r: 10, max: 120, t: 0, color: '#ffe45c' });
+    switch (it.id) {
+      case 'pegasus':
+        r.boost = Math.max(r.boost, 3.4 * pw);
+        r.inv = Math.max(r.inv, 2.6 * pw);
+        if (r.me || r.near) hud.say(`${r.name}、ペガサスで一気に加速！`, loud);
+        break;
+      case 'panjan':
+        this.rollers.push({ x: r.x + 40, y: r.y, life: 2.4 * pw, owner: r, rot: 0 });
+        if (r.me || r.near) hud.say(`${r.name}がパンジャンドラムを転がした！ 前のヒーローは要注意！`, loud);
+        break;
+      case 'goblet':
+        r.hp = Math.min(r.maxHp, r.hp + r.maxHp * 0.6 * pw);
+        if (r.me) sample('heal', 0.6);
+        break;
+      case 'trap':
+        this.traps.push({ x: r.x - 46, y: r.y, owner: r, t: 0 });
+        if (r.me) hud.say(`${r.name}、うしろにネズミ捕りを仕掛けた！`, loud, 'ain');
+        break;
+      case 'decoy':
+        r.decoy = 6 * pw;
+        if (r.me || r.near) hud.say(`${r.name}、こけしを身代わりに！ エネミーがまわりのヒーローへ向かう！`, loud, 'ain');
+        break;
+      case 'mirror':
+        r.mirror = 8 * pw;
+        if (r.me || r.near) hud.say(`${r.name}、鏡をかまえた。妨害ははね返されます`, loud, 'ain');
+        break;
+      case 'bolt': {
+        let n = 0;
+        for (const o of [this.hero, ...this.rivals]) {
+          if (o === r || o.done || o.ko > 0 || o.x < r.x || o.x > r.x + 1600) continue;
+          if (this.reflects(o, '雷')) continue;
+          this.trip(o, 0.5, 2.4 * pw);
+          n++;
+        }
+        sfx('boom');
+        this.shake = Math.max(this.shake, 8);
+        hud.say(`${r.name}の御札から雷！ 前を行く${n}組の足が止まった！`, 2);
+        break;
+      }
+      case 'dragon':
+        r.dragon = 3.6 * pw;
+        r.inv = Math.max(r.inv, r.dragon);
+        hud.say(`${r.name}がライドラゴンに乗った！ 猛スピードで追い上げる！`, 2);
+        break;
+    }
+  }
+
+  /** Things left on the course by helper items. */
+  private stepItems(dt: number): void {
+    const all = [this.hero, ...this.rivals];
+    for (const ro of this.rollers) {
+      ro.life -= dt;
+      ro.x += 640 * dt;
+      ro.rot += dt * 14;
+      for (const e of this.enemies) {
+        if (!e.dead && !e.asleep && !e.boss && dist2(e.x, e.y, ro.x, ro.y) < (e.r + 26) ** 2) this.hitEnemy(e, 60, 200, 0, ro.owner.me ? null : ro.owner);
+      }
+      for (const o of all) {
+        if (o === ro.owner || o.done || o.ko > 0 || !o.near || dist2(o.x, o.y, ro.x, ro.y) > 34 * 34) continue;
+        ro.life = 0;
+        if (this.reflects(o, 'パンジャンドラム')) break;
+        this.trip(o, 1.3, 1.5);
+        if (o.me || ro.owner.me) this.host.hud.say(`パンジャンドラムが${o.name}を直撃！`, 2);
+        break;
+      }
+      const gate = this.gates.find((g) => g.x > ro.x - 700);
+      if (gate && ro.x > gate.x - 30 && ro.owner.gate <= gate.tier) ro.life = 0;
+    }
+    this.rollers = this.rollers.filter((r) => r.life > 0);
+    for (const t of this.traps) {
+      t.t += dt;
+      for (const o of all) {
+        if (o === t.owner || o.done || o.ko > 0 || !o.near || dist2(o.x, o.y, t.x, t.y) > 30 * 30) continue;
+        t.t = 99;
+        if (this.reflects(o, 'ネズミ捕り')) break;
+        this.trip(o, 0.7, 2.6);
+        if (o.me || t.owner.me) this.host.hud.say(`${o.name}がネズミ捕りにかかった！`, 2);
+        break;
+      }
+    }
+    this.traps = this.traps.filter((t) => t.t < 40);
   }
 
   // ------------------------------------------------------------------ rivals
@@ -376,7 +496,7 @@ export class LandStage extends Arena {
     r.strikeT = Math.max(0, r.strikeT - dt);
     r.think -= dt;
     const atGate = !!gate && r.x > gate.x - 190;
-    const sp = r.pace * (r.slow > 0 ? 0.6 : 1) * (r.buffSpd > 0 ? 1.25 : 1) * (r.boost > 0 ? 1.4 : 1);
+    const sp = r.pace * (r.slow > 0 ? 0.6 : 1) * (r.buffSpd > 0 ? 1.25 : 1) * (r.boost > 0 ? 1.4 : 1) * (r.dragon > 0 ? 2.1 : 1);
 
     if (!r.near) {
       // far from the camera: no monsters are simulated there, so trouble is rolled instead
@@ -420,26 +540,31 @@ export class LandStage extends Arena {
         }
       }
     }
-    // gear and item boxes within reach
+    // chest panels within reach
     let want: { x: number; y: number } | null = null;
-    let wd = 230 * 230;
-    for (const p of this.pickups) {
-      if (p.taken || p.x < r.x - 30) continue;
-      const d = dist2(p.x, p.y, r.x, r.y);
-      if (d < 32 * 32) {
-        p.taken = true;
-        r.dps += 4 + p.ext.rarity * 2;
-        this.puff(p.x, p.y, '#ffffff', 5);
-        if (p.ext.rarity >= 4) this.host.hud.say(`${r.name}、${RARITY_NAME[p.ext.rarity]}の${p.ext.seriesName}を手に入れた！`, 1);
-      } else if (d < wd && r.mood > 0.25) {
+    let wd = 260 * 260;
+    for (const c of this.chests) {
+      if (c.taken || c.x < r.x - 20) continue;
+      const d = dist2(c.x, c.y, r.x, r.y);
+      if (d < 36 * 36) {
+        if (!r.item) {
+          c.taken = true;
+          let ahead = 0;
+          for (const o of this.rivals) if (o.done || o.x > r.x) ahead++;
+          r.item = rollItem(ahead / (FIELD - 1), this.st);
+          r.itemT = 0.6 + Math.random() * 2.2;
+        }
+      } else if (d < wd && !r.item && r.mood > 0.3) {
         wd = d;
-        want = p;
+        want = c;
       }
     }
-    for (const b of this.boxes) {
-      if (!b.taken && dist2(b.x, b.y, r.x, r.y) < 34 * 34) {
-        b.taken = true;
-        this.useItem(r);
+    if (r.item) {
+      r.itemT -= dt;
+      if (r.itemT <= 0) {
+        const it = r.item;
+        r.item = null;
+        this.useItem(r, it);
       }
     }
     for (const p of this.pads) {
@@ -572,9 +697,8 @@ export class LandStage extends Arena {
   }
 
   protected killed(e: Enemy): void {
-    if (e.elite && this.rng() < 0.5) {
-      this.pickups.push({ x: e.x, y: e.y, ext: rollExt(this.run, this.rng, 0.6), t: 0, taken: false });
-    }
+    // elites are worth a free card
+    if (e.elite && this.rng() < 0.35) this.grant(1);
   }
 
   // ------------------------------------------------------------------ drawing
@@ -684,19 +808,35 @@ export class LandStage extends Arena {
         g.fill();
       }
     }
-    for (const b of this.boxes) {
-      if (b.taken || b.x < this.camX - 60 || b.x > x1) continue;
-      const bob = Math.sin(b.t * 4) * 4;
-      g.fillStyle = 'rgba(0,0,0,0.25)';
-      g.fillRect(b.x - 16, b.y + 20, 32, 6);
-      g.fillStyle = '#b693ff';
-      g.fillRect(b.x - 18, b.y - 18 + bob, 36, 36);
-      g.fillStyle = '#e4d6ff';
-      g.fillRect(b.x - 18, b.y - 18 + bob, 36, 8);
-      g.fillStyle = '#fff';
-      g.font = '22px "Dela Gothic One", sans-serif';
-      g.textAlign = 'center';
-      g.fillText('?', b.x, b.y + 12 + bob);
+    for (const c of this.chests) {
+      if (c.taken || c.x < this.camX - 60 || c.x > x1) continue;
+      const glow = 0.5 + Math.sin(c.t * 5) * 0.5;
+      g.fillStyle = `rgba(255,228,92,${0.18 + glow * 0.14})`;
+      g.fillRect(c.x - 40, c.y - 44, 80, 88);
+      g.strokeStyle = '#ffe45c';
+      g.lineWidth = 3;
+      g.strokeRect(c.x - 40, c.y - 44, 80, 88);
+      const by = c.y - 4 + Math.sin(c.t * 4) * 3;
+      g.fillStyle = '#8a5a2b';
+      g.fillRect(c.x - 20, by - 10, 40, 26);
+      g.fillStyle = '#b9792f';
+      g.fillRect(c.x - 20, by - 16, 40, 12);
+      g.fillStyle = '#ffd84d';
+      g.fillRect(c.x - 20, by - 6, 40, 4);
+      g.fillRect(c.x - 4, by - 9, 8, 10);
+    }
+    for (const t of this.traps) {
+      if (t.x < this.camX - 60 || t.x > x1) continue;
+      this.sprite(g, cat.extArt['1179'].img, t.x, t.y + 8, 40, false);
+    }
+    for (const ro of this.rollers) {
+      const im = cat.extArt['1153'].img;
+      g.save();
+      g.translate(ro.x, ro.y);
+      g.rotate(ro.rot);
+      this.sprite(g, im, 0, 0, 56, false);
+      g.restore();
+      this.puff(ro.x - 20, ro.y + 16, '#d9c7a0', 1);
     }
 
     this.checker(g, 110);
@@ -739,14 +879,13 @@ export class LandStage extends Arena {
 
   protected drawOverlay(g: CanvasRenderingContext2D): void {
     const h = this.hero;
-    for (const p of this.pickups) {
-      const sx = p.x - this.camX;
-      const sy = p.y - this.camY;
-      if (sx > 0 && sx < this.vw && sy > 0 && sy < this.vh) continue;
-      if (p.x < h.x - 200 || p.x > h.x + this.vw) continue;
-      g.globalAlpha = 0.85;
-      this.sprite(g, p.ext.img, clamp(sx, 26, this.vw - 26), clamp(sy, 96, this.vh - 26), 28, false);
-      g.globalAlpha = 1;
+    // what the rivals nearby are holding (so a mirror can be timed)
+    for (const r of this.rivals) {
+      if (!r.item || r.done || !r.near) continue;
+      const sx = r.x - this.camX;
+      const sy = r.y - this.camY;
+      if (sx < 0 || sx > this.vw || sy < 0 || sy > this.vh) continue;
+      this.sprite(g, itemImg(r.item), sx + 22, sy - 30, 22, false);
     }
     if (this.st.draft > 0 && h.ko <= 0 && this.drafting()) {
       g.strokeStyle = 'rgba(155,233,255,0.7)';
@@ -781,30 +920,29 @@ export class LandStage extends Arena {
       strike = d < 150 && !this.rivals.some((r) => !r.done && dist2(r.x, r.y, h.x, h.y) < 100 * 100);
     } else {
       let best = null as null | { x: number; y: number };
-      let bd = 420 * 420;
-      for (const p of this.pickups) {
-        if (p.x < h.x - 40) continue;
-        const d = dist2(p.x, p.y, h.x, h.y);
-        if (d < bd) {
-          bd = d;
-          best = p;
+      let bd = 520 * 520;
+      if (this.run.items.length < this.st.itemSlots) {
+        for (const c of this.chests) {
+          if (c.taken || c.x < h.x + 30) continue;
+          const d = dist2(c.x, c.y, h.x, h.y);
+          if (d < bd) {
+            bd = d;
+            best = c;
+          }
         }
       }
-      if (best) {
-        x = best.x - h.x;
-        y = best.y - h.y;
-      } else y = (H / 2 - h.y) / 200;
+      y = best ? (best.y - h.y) / 60 : (H / 2 - h.y) / 200;
+      x = 0;
     }
+    if (this.run.items.length && Math.random() < 0.02) pressItem(0);
     for (const e of this.enemies) {
       if (e.dead || e.boss) continue;
       const d2 = dist2(e.x, e.y, h.x, h.y);
       if (d2 < 80 * 80) {
         const d = Math.sqrt(d2) || 1;
-        x += ((h.x - e.x) / d) * 1.2;
         y += ((h.y - e.y) / d) * 1.2;
       }
     }
-    const l = Math.hypot(x, y) || 1;
-    return { x: x / l, y: y / l, a: !b && h.dashCd <= 0 && Math.random() < 0.05, b: strike };
+    return { x: 0, y: clamp(y, -1, 1), a: !b && h.dashCd <= 0 && Math.random() < 0.05, b: strike };
   }
 }

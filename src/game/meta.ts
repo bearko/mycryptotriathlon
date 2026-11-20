@@ -20,20 +20,26 @@ export interface Stats {
   dmg: number; speed: number; hp: number; regen: number; cd: number; crit: number;
   dashCd: number; dashHit: number; rocket: number; draft: number; pads: number; padPower: number;
   guard: number; ko: number; revive: number; grit: number; passive: number;
-  strike: number; bump: number; foulLimit: number; freeze: number; items: number; itemPower: number;
-  ce: number; xp: number; magnet: number; pickups: number; luck: number;
-  startLv: number; startExtra: number; slots: number; maxRarity: number; gearLv2: number; awake: number;
-  kMagic: number; kOrbit: number; kBeast: number; kAura: number;
+  strike: number; bump: number; foulLimit: number; freeze: number;
+  ce: number; xp: number; gum: number; magnet: number; reroll: number; options: number;
+  startLv: number; startExtra: number; maxLv: number; wSlots: number; bSlots: number; awake: number;
+  // gear opened in the tree (0 / 1)
+  wBook: number; wBroom: number; wShuriken: number; wParrot: number; wLaser: number; wSnow: number;
+  bRamen: number; bHorse: number; bShield: number; bOriflamme: number; bSpecimen: number; bGunbai: number; bGyoku: number; bCrown: number;
+  // helper items
+  iTrap: number; iDecoy: number; iMirror: number; iBolt: number; iDragon: number; itemPower: number; itemSlots: number; chests: number;
   enemyHp: number; enemyCount: number; course: number; rival: number;
 }
 export const BASE: Stats = {
   dmg: 1, speed: 1, hp: 1, regen: 0, cd: 1, crit: 0.04,
   dashCd: 1, dashHit: 0, rocket: 0, draft: 0, pads: 0, padPower: 1,
   guard: 1, ko: 1, revive: 0.4, grit: 0, passive: 1,
-  strike: 1, bump: 1, foulLimit: 5, freeze: 1, items: 0, itemPower: 1,
-  ce: 1, xp: 1, magnet: 1, pickups: 1, luck: 0,
-  startLv: 1, startExtra: 0, slots: 6, maxRarity: 3, gearLv2: 0, awake: 0,
-  kMagic: 0, kOrbit: 0, kBeast: 0, kAura: 0,
+  strike: 1, bump: 1, foulLimit: 5, freeze: 1,
+  ce: 1, xp: 1, gum: 1, magnet: 1, reroll: 0, options: 3,
+  startLv: 1, startExtra: 0, maxLv: 3, wSlots: 3, bSlots: 3, awake: 0,
+  wBook: 0, wBroom: 0, wShuriken: 0, wParrot: 0, wLaser: 0, wSnow: 0,
+  bRamen: 0, bHorse: 0, bShield: 0, bOriflamme: 0, bSpecimen: 0, bGunbai: 0, bGyoku: 0, bCrown: 0,
+  iTrap: 0, iDecoy: 0, iMirror: 0, iBolt: 0, iDragon: 0, itemPower: 1, itemSlots: 2, chests: 1,
   enemyHp: 1, enemyCount: 1, course: 1, rival: 0,
 };
 type Key = keyof Stats;
@@ -57,67 +63,88 @@ export interface SkillNode {
   flavor?: 'new' | 'risk';
 }
 
-const ext = (series: number, rarity: number) =>
-  cat.exts.find((e) => e.series === series && e.rarity === rarity)?.img ?? cat.exts[0].img;
+const art = (id: number) => cat.extArt[String(id)]?.img ?? cat.exts[0].img;
 const foe = (key: string, i = 0) => cat.enemies[key][i].img;
+type N = Omit<SkillNode, 'growth' | 'max' | 'baseCost'> & { max?: number; baseCost: number; growth?: number };
+const node = (n: N): SkillNode => ({ max: 1, growth: 1, ...n });
+/** A node that opens a piece of gear or a helper item: one level, gold frame. */
+const open = (id: string, branch: Branch, name: string, what: string, icon: number, x: number, y: number, cost: number, requires: string[], key: Key, currency?: Currency): SkillNode =>
+  node({ id, branch, name, desc: what, icon: art(icon), x, y, baseCost: cost, requires, effects: [set(key, 1)], flavor: 'new', currency });
 
 export const SKILLS: SkillNode[] = [
-  { id: 'root', branch: 'root', name: 'エントリー', desc: 'トライアスロンへの参加登録。ここから五勢力の鍛錬が広がる', icon: cat.chars.chrisCheer, x: 0, y: 0, max: 1, baseCost: 0, growth: 1, requires: [], effects: [] },
+  node({ id: 'root', branch: 'root', name: 'エントリー', desc: 'トライアスロンへの参加登録。ここから五勢力の鍛錬が広がる', icon: cat.chars.chrisCheer, x: 0, y: 0, baseCost: 0, requires: [], effects: [] }),
 
-  // 朱雀: the gear and how hard it hits (up)
-  { id: 'atk', branch: 'suzaku', name: '鍛錬', desc: 'エクステンションの威力 +8%', icon: ext(1, 2), x: 0, y: -1, max: 10, baseCost: 12, growth: 1.45, requires: ['root'], effects: [mul('dmg', 0.08)] },
-  { id: 'startLv', branch: 'suzaku', name: '愛用の品', desc: '最初に持っているエクステンションの Lv +1', icon: ext(1, 1), x: -1, y: -2, max: 4, baseCost: 35, growth: 2.1, requires: ['atk'], effects: [add('startLv', 1)] },
-  { id: 'cd', branch: 'suzaku', name: '早業', desc: 'エクステンションの攻撃間隔 -4%', icon: ext(6, 2), x: 1, y: -2, max: 8, baseCost: 30, growth: 1.55, requires: ['atk'], effects: [pow('cd', 0.96)] },
-  { id: 'kMagic', branch: 'suzaku', name: '魔法の解禁', desc: '追いかける魔法弾を撃つ「魔法」のエクステンションが、コースに出るようになる', icon: ext(8, 3), x: 0, y: -2, max: 1, baseCost: 60, growth: 1, requires: ['atk'], effects: [set('kMagic', 1)], flavor: 'new' },
-  { id: 'kOrbit', branch: 'suzaku', name: '周回の解禁', desc: 'まわりを回って守る「周回」のエクステンションが出るようになる', icon: ext(10, 3), x: 0, y: -3, max: 1, baseCost: 140, growth: 1, requires: ['kMagic'], effects: [set('kOrbit', 1)], flavor: 'new' },
-  { id: 'kBeast', branch: 'suzaku', name: '突進の解禁', desc: '幻獣が敵をなぎ倒す「突進」のエクステンションが出るようになる', icon: ext(22, 3), x: -1, y: -3, max: 1, baseCost: 260, growth: 1, requires: ['kOrbit'], effects: [set('kBeast', 1)], flavor: 'new' },
-  { id: 'kAura', branch: 'suzaku', name: '波動の解禁', desc: '周囲をまとめて攻撃し、敵を鈍らせる「波動」のエクステンションが出るようになる', icon: ext(65, 3), x: 1, y: -3, max: 1, baseCost: 260, growth: 1, requires: ['kOrbit'], effects: [set('kAura', 1)], flavor: 'new' },
-  { id: 'crit', branch: 'suzaku', name: '会心', desc: '会心（1.8倍）の確率 +3%', icon: ext(28, 3), x: 1, y: -4, max: 8, baseCost: 80, growth: 1.55, requires: ['kAura'], effects: [add('crit', 0.03)] },
-  { id: 'start2', branch: 'suzaku', name: '二刀流', desc: '最初から、もう 1 つエクステンションを持って走り出す', icon: ext(82, 3), x: -1, y: -4, max: 2, baseCost: 320, growth: 3, requires: ['kBeast'], effects: [add('startExtra', 1)], flavor: 'new' },
-  { id: 'epic', branch: 'suzaku', name: 'インペリアル級', desc: 'エピックのエクステンションがコースに出るようになる', icon: ext(1, 4), x: 0, y: -4, max: 1, baseCost: 450, growth: 1, requires: ['kOrbit'], effects: [set('maxRarity', 4)], flavor: 'new' },
-  { id: 'legend', branch: 'suzaku', name: 'MCH級', desc: 'レジェンダリーのエクステンションがコースに出るようになる', icon: ext(1, 5), x: 0, y: -5, max: 1, baseCost: 4, growth: 1, requires: ['epic'], effects: [set('maxRarity', 5)], currency: 'medal', flavor: 'new' },
-  { id: 'slot7', branch: 'suzaku', name: '七つ道具', desc: 'エクステンションの枠 +1', icon: ext(96, 3), x: 0, y: -6, max: 2, baseCost: 6, growth: 1.5, requires: ['legend'], effects: [add('slots', 1)], currency: 'medal', flavor: 'new' },
+  // 朱雀: the gear that fights, and how hard it hits (up)
+  node({ id: 'atk', branch: 'suzaku', name: '鍛錬', desc: 'エクステンションの威力 +8%', icon: art(2001), x: 0, y: -1, max: 10, baseCost: 12, growth: 1.45, requires: ['root'], effects: [mul('dmg', 0.08)] }),
+  node({ id: 'startLv', branch: 'suzaku', name: '愛用の品', desc: '最初に持っているエクステンションの Lv +1', icon: art(1001), x: -1, y: -2, max: 2, baseCost: 60, growth: 4, requires: ['atk'], effects: [add('startLv', 1)] }),
+  node({ id: 'cd', branch: 'suzaku', name: '早業', desc: 'エクステンションの攻撃間隔 -4%', icon: art(2006), x: 1, y: -2, max: 8, baseCost: 30, growth: 1.55, requires: ['atk'], effects: [pow('cd', 0.96)] }),
+  open('wBook', 'suzaku', 'ブックの解禁', 'まわりを回って守る「ブック」が、レベルアップの候補に出るようになる', 3008, 0, -2, 50, ['atk'], 'wBook'),
+  open('wShuriken', 'suzaku', '手裏剣の解禁', '近い敵へ 3 連で飛ぶ「手裏剣」が候補に出るようになる', 3124, 0, -3, 120, ['wBook'], 'wShuriken'),
+  open('wBroom', 'suzaku', 'ホーキの解禁', 'ゆっくり追いかけて貫く大きな「ホーキ」が候補に出るようになる', 3080, -1, -3, 220, ['wShuriken'], 'wBroom'),
+  open('wParrot', 'suzaku', 'パロットの解禁', '敵の頭上から舞い降りる「パロット」が候補に出るようになる', 3113, 1, -3, 220, ['wShuriken'], 'wParrot'),
+  open('wLaser', 'suzaku', 'レーザーガンの解禁', '敵をまとめて貫く「レーザーガン」が候補に出るようになる', 3130, -1, -4, 380, ['wBroom'], 'wLaser'),
+  open('wSnow', 'suzaku', '雪だるまの解禁', '足もとに置いて爆ぜる「雪だるま」が候補に出るようになる', 3126, 1, -4, 380, ['wParrot'], 'wSnow'),
+  node({ id: 'tier4', branch: 'suzaku', name: 'インペリアル級', desc: 'エクステンションを Lv4 まで育てられる', icon: art(4001), x: 0, y: -4, baseCost: 350, requires: ['wShuriken'], effects: [set('maxLv', 4)], flavor: 'new' }),
+  node({ id: 'tier5', branch: 'suzaku', name: 'MCH級', desc: 'エクステンションを Lv5 まで育てられる', icon: art(5001), x: 0, y: -5, baseCost: 4, requires: ['tier4'], effects: [set('maxLv', 5)], currency: 'medal', flavor: 'new' }),
+  node({ id: 'wSlots', branch: 'suzaku', name: '武器の枠', desc: '同時に持てる武器の種類 +1', icon: art(3096), x: 0, y: -6, max: 2, baseCost: 5, growth: 1.6, requires: ['tier5'], effects: [add('wSlots', 1)], currency: 'medal', flavor: 'new' }),
+  node({ id: 'crit', branch: 'suzaku', name: '会心', desc: '会心（1.8倍）の確率 +3%', icon: art(3028), x: 2, y: -3, max: 8, baseCost: 80, growth: 1.55, requires: ['cd'], effects: [add('crit', 0.03)] }),
+  open('bOriflamme', 'suzaku', 'オリフラムの解禁', '弾の数を増やす「オリフラム」が候補に出るようになる', 3140, 2, -4, 260, ['crit'], 'bOriflamme'),
+  open('bGunbai', 'suzaku', 'グンバイの解禁', '弾が敵を貫くようになる「グンバイ」が候補に出るようになる', 3037, 2, -5, 320, ['bOriflamme'], 'bGunbai'),
+  open('bSpecimen', 'suzaku', '標本の解禁', '攻撃の届く範囲を広げる「標本」が候補に出るようになる', 3169, -2, -3, 160, ['startLv'], 'bSpecimen'),
+  node({ id: 'start2', branch: 'suzaku', name: '二刀流', desc: '最初から、もう 1 つ武器を持って走り出す', icon: art(3082), x: -2, y: -4, baseCost: 400, requires: ['bSpecimen'], effects: [add('startExtra', 1)], flavor: 'new' }),
+  node({ id: 'bSlots', branch: 'suzaku', name: '強化の枠', desc: '同時に持てる強化の種類 +1', icon: art(3017), x: -2, y: -5, max: 2, baseCost: 4, growth: 1.6, requires: ['start2'], effects: [add('bSlots', 1)], currency: 'medal', flavor: 'new' }),
 
   // 青龍: speed (right)
-  { id: 'speed', branch: 'seiryu', name: '俊足', desc: '走る・泳ぐ速さ +2.5%', icon: ext(31, 2), x: 1, y: 0, max: 10, baseCost: 12, growth: 1.5, requires: ['root'], effects: [mul('speed', 0.025)] },
-  { id: 'dash', branch: 'seiryu', name: '身のこなし', desc: 'ダッシュの再使用までの時間 -7%', icon: ext(5, 2), x: 2, y: -1, max: 6, baseCost: 30, growth: 1.6, requires: ['speed'], effects: [pow('dashCd', 0.93)] },
-  { id: 'rocket', branch: 'seiryu', name: 'ロケットスタート', desc: 'スタート直後の加速（+40%）が 1.5 秒のびる', icon: ext(121, 3), x: 2, y: 1, max: 4, baseCost: 45, growth: 1.9, requires: ['speed'], effects: [add('rocket', 1.5)] },
-  { id: 'draft', branch: 'seiryu', name: 'スリップストリーム', desc: '前を走るヒーローの真後ろにつくと、速さ +5%', icon: ext(120, 3), x: 3, y: 0, max: 5, baseCost: 90, growth: 1.7, requires: ['speed'], effects: [add('draft', 0.05)], flavor: 'new' },
-  { id: 'dashHit', branch: 'seiryu', name: '突破', desc: 'ダッシュで触れた敵をはじき飛ばしてダメージを与える', icon: ext(23, 3), x: 3, y: -1, max: 5, baseCost: 110, growth: 1.7, requires: ['dash'], effects: [add('dashHit', 1)], flavor: 'new' },
-  { id: 'pads', branch: 'seiryu', name: 'ダッシュパネル', desc: 'コースに、踏むと加速するパネルが置かれるようになる', icon: ext(115, 3), x: 4, y: 0, max: 1, baseCost: 180, growth: 1, requires: ['draft'], effects: [set('pads', 1)], flavor: 'new' },
-  { id: 'padPower', branch: 'seiryu', name: 'パネルの整備', desc: 'ダッシュパネルの加速が 20% 長く続く', icon: ext(38, 3), x: 5, y: 0, max: 5, baseCost: 120, growth: 1.6, requires: ['pads'], effects: [mul('padPower', 0.2)] },
+  node({ id: 'speed', branch: 'seiryu', name: '俊足', desc: '走る・泳ぐ速さ +2.5%', icon: art(2031), x: 1, y: 0, max: 10, baseCost: 12, growth: 1.5, requires: ['root'], effects: [mul('speed', 0.025)] }),
+  node({ id: 'dash', branch: 'seiryu', name: '身のこなし', desc: 'ダッシュの再使用までの時間 -7%', icon: art(2005), x: 2, y: -1, max: 6, baseCost: 30, growth: 1.6, requires: ['speed'], effects: [pow('dashCd', 0.93)] }),
+  node({ id: 'rocket', branch: 'seiryu', name: 'ロケットスタート', desc: 'スタート直後の加速（+40%）が 1.5 秒のびる', icon: art(3121), x: 2, y: 1, max: 4, baseCost: 45, growth: 1.9, requires: ['speed'], effects: [add('rocket', 1.5)] }),
+  node({ id: 'draft', branch: 'seiryu', name: 'スリップストリーム', desc: '前を走るヒーローの真後ろにつくと、速さ +5%', icon: art(3120), x: 3, y: 0, max: 5, baseCost: 90, growth: 1.7, requires: ['speed'], effects: [add('draft', 0.05)], flavor: 'new' }),
+  node({ id: 'dashHit', branch: 'seiryu', name: '突破', desc: 'ダッシュで触れた敵をはじき飛ばしてダメージを与える', icon: art(3023), x: 3, y: -1, max: 5, baseCost: 110, growth: 1.7, requires: ['dash'], effects: [add('dashHit', 1)], flavor: 'new' }),
+  open('bHorse', 'seiryu', 'ホースの解禁', '攻撃の間隔を縮める「ホース」が候補に出るようになる', 3005, 4, -1, 240, ['dashHit'], 'bHorse'),
+  node({ id: 'pads', branch: 'seiryu', name: 'ダッシュパネル', desc: 'コースに、踏むと加速するパネルが置かれるようになる', icon: art(3115), x: 4, y: 0, baseCost: 180, requires: ['draft'], effects: [set('pads', 1)], flavor: 'new' }),
+  node({ id: 'padPower', branch: 'seiryu', name: 'パネルの整備', desc: 'ダッシュパネルの加速が 20% 長く続く', icon: art(3038), x: 5, y: 0, max: 5, baseCost: 120, growth: 1.6, requires: ['pads'], effects: [mul('padPower', 0.2)] }),
 
   // 玄武: staying on your feet (left)
-  { id: 'hp', branch: 'genbu', name: '頑健', desc: '最大 HP（海では酸素）+8%', icon: ext(4, 2), x: -1, y: 0, max: 10, baseCost: 12, growth: 1.5, requires: ['root'], effects: [mul('hp', 0.08)] },
-  { id: 'regen', branch: 'genbu', name: '自然治癒', desc: '毎秒 HP が 0.5 回復する', icon: ext(30, 2), x: -2, y: -1, max: 5, baseCost: 40, growth: 1.7, requires: ['hp'], effects: [add('regen', 0.5)] },
-  { id: 'ko', branch: 'genbu', name: '不屈', desc: '気絶している時間 -10%', icon: ext(18, 2), x: -2, y: 1, max: 5, baseCost: 55, growth: 1.7, requires: ['hp'], effects: [pow('ko', 0.9)] },
-  { id: 'revive', branch: 'genbu', name: '起死回生', desc: '気絶から立ち上がるときの HP +10%', icon: cat.icons.resurrection, x: -3, y: 1, max: 5, baseCost: 60, growth: 1.6, requires: ['ko'], effects: [add('revive', 0.1)] },
-  { id: 'guard', branch: 'genbu', name: '受け身', desc: '受けるダメージ -5%', icon: ext(10, 2), x: -3, y: 0, max: 6, baseCost: 70, growth: 1.6, requires: ['hp'], effects: [pow('guard', 0.95)] },
-  { id: 'grit', branch: 'genbu', name: '踏ん張り', desc: '敵に触れたときに足が鈍るのを、30% やわらげる', icon: ext(81, 3), x: -3, y: -1, max: 3, baseCost: 90, growth: 1.8, requires: ['regen'], effects: [add('grit', 0.3)] },
-  { id: 'passive', branch: 'genbu', name: '英霊の加護', desc: 'ヒーローのパッシブスキルが発動しやすくなる（+20%）', icon: cat.icons.bufInt, x: -4, y: 0, max: 4, baseCost: 130, growth: 1.8, requires: ['guard'], effects: [mul('passive', 0.2)], flavor: 'new' },
+  node({ id: 'hp', branch: 'genbu', name: '頑健', desc: '最大 HP（海では酸素）+8%', icon: art(2004), x: -1, y: 0, max: 10, baseCost: 12, growth: 1.5, requires: ['root'], effects: [mul('hp', 0.08)] }),
+  node({ id: 'regen', branch: 'genbu', name: '自然治癒', desc: '毎秒 HP が 0.5 回復する', icon: art(2030), x: -2, y: -1, max: 5, baseCost: 40, growth: 1.7, requires: ['hp'], effects: [add('regen', 0.5)] }),
+  node({ id: 'ko', branch: 'genbu', name: '不屈', desc: '気絶している時間 -10%', icon: art(2018), x: -2, y: 1, max: 5, baseCost: 55, growth: 1.7, requires: ['hp'], effects: [pow('ko', 0.9)] }),
+  node({ id: 'revive', branch: 'genbu', name: '起死回生', desc: '気絶から立ち上がるときの HP +10%', icon: cat.icons.resurrection, x: -3, y: 1, max: 5, baseCost: 60, growth: 1.6, requires: ['ko'], effects: [add('revive', 0.1)] }),
+  node({ id: 'guard', branch: 'genbu', name: '受け身', desc: '受けるダメージ -5%', icon: art(2010), x: -3, y: 0, max: 6, baseCost: 70, growth: 1.6, requires: ['hp'], effects: [pow('guard', 0.95)] }),
+  node({ id: 'grit', branch: 'genbu', name: '踏ん張り', desc: '敵に触れたときに足が鈍るのを、30% やわらげる', icon: art(3081), x: -3, y: -1, max: 3, baseCost: 90, growth: 1.8, requires: ['regen'], effects: [add('grit', 0.3)] }),
+  node({ id: 'passive', branch: 'genbu', name: '英霊の加護', desc: 'ヒーローのパッシブスキルが発動しやすくなる（+20%）', icon: cat.icons.bufInt, x: -4, y: 0, max: 4, baseCost: 130, growth: 1.8, requires: ['guard'], effects: [mul('passive', 0.2)], flavor: 'new' }),
+  open('bRamen', 'genbu', 'ラーメンの解禁', '毎秒 HP が回復する「ラーメン」が候補に出るようになる', 3154, -4, -1, 140, ['grit'], 'bRamen'),
+  open('bShield', 'genbu', 'シールドの解禁', '受けるダメージを減らす「シールド」が候補に出るようになる', 3010, -4, 1, 140, ['revive'], 'bShield'),
 
-  // 白虎: jostling (down-left)
-  { id: 'strike', branch: 'byakko', name: '喧嘩殺法', desc: 'ストライク（直接攻撃）の威力 +25%', icon: ext(164, 3), x: -1, y: 1, max: 5, baseCost: 25, growth: 1.6, requires: ['root'], effects: [mul('strike', 0.25)] },
-  { id: 'bump', branch: 'byakko', name: 'ショルダーチャージ', desc: 'ダッシュの体当たりでライバルを押しのける力 +30%（体当たりは反則にならない）', icon: ext(99, 3), x: -1, y: 2, max: 4, baseCost: 40, growth: 1.7, requires: ['strike'], effects: [mul('bump', 0.3)] },
-  { id: 'foul', branch: 'byakko', name: '審判の死角', desc: '審判に止められるまでの反則ポイント +1', icon: ext(102, 3), x: -2, y: 2, max: 3, baseCost: 110, growth: 2, requires: ['bump'], effects: [add('foulLimit', 1)] },
-  { id: 'freeze', branch: 'byakko', name: '言い逃れ', desc: '反則で止められる時間 -15%', icon: ext(3, 3), x: -2, y: 3, max: 4, baseCost: 80, growth: 1.7, requires: ['foul'], effects: [pow('freeze', 0.85)] },
-  { id: 'items', branch: 'byakko', name: 'アイテムボックス', desc: 'コースにアイテムボックスが置かれるようになる。拾うとその場で発動（加速・雷・おとり）', icon: ext(178, 3), x: -1, y: 3, max: 1, baseCost: 200, growth: 1, requires: ['bump'], effects: [set('items', 1)], flavor: 'new' },
-  { id: 'itemPower', branch: 'byakko', name: 'とっておき', desc: 'アイテムの効果 +25%', icon: ext(153, 3), x: -1, y: 4, max: 4, baseCost: 150, growth: 1.7, requires: ['items'], effects: [mul('itemPower', 0.25)] },
+  // 白虎: jostling, and the helper items from the chest panels (down-left)
+  node({ id: 'strike', branch: 'byakko', name: '喧嘩殺法', desc: 'ストライク（直接攻撃）の威力 +25%', icon: art(3164), x: -1, y: 1, max: 5, baseCost: 25, growth: 1.6, requires: ['root'], effects: [mul('strike', 0.25)] }),
+  node({ id: 'bump', branch: 'byakko', name: 'ショルダーチャージ', desc: 'ダッシュの体当たりでライバルを押しのける力 +30%（体当たりは反則にならない）', icon: art(3099), x: -1, y: 2, max: 4, baseCost: 40, growth: 1.7, requires: ['strike'], effects: [mul('bump', 0.3)] }),
+  node({ id: 'foul', branch: 'byakko', name: '審判の死角', desc: '審判に止められるまでの反則ポイント +1', icon: art(3102), x: -2, y: 2, max: 3, baseCost: 110, growth: 2, requires: ['bump'], effects: [add('foulLimit', 1)] }),
+  node({ id: 'freeze', branch: 'byakko', name: '言い逃れ', desc: '反則で止められる時間 -15%', icon: art(3003), x: -2, y: 3, max: 4, baseCost: 80, growth: 1.7, requires: ['foul'], effects: [pow('freeze', 0.85)] }),
+  node({ id: 'chests', branch: 'byakko', name: '宝箱パネルの増設', desc: 'コースの宝箱パネル +20%', icon: art(3178), x: -1, y: 3, max: 3, baseCost: 70, growth: 1.9, requires: ['bump'], effects: [mul('chests', 0.2)] }),
+  node({ id: 'itemPower', branch: 'byakko', name: 'とっておき', desc: 'お助けエクステンションの効果 +20%', icon: art(3153), x: -1, y: 4, max: 5, baseCost: 90, growth: 1.7, requires: ['chests'], effects: [mul('itemPower', 0.2)] }),
+  open('iTrap', 'byakko', 'ネズミ捕りの追加', '宝箱パネルから「ネズミ捕り」が出るようになる。うしろに仕掛けて、踏んだライバルの足を止める', 1179, -2, 4, 90, ['chests'], 'iTrap'),
+  open('iMirror', 'byakko', '鏡の追加', '宝箱パネルから「鏡」が出るようになる。しばらく妨害をはね返す', 1105, -3, 4, 150, ['iTrap'], 'iMirror'),
+  open('iDecoy', 'byakko', 'こけしの追加', '宝箱パネルから「こけし」が出るようになる。エネミーがまわりのライバルへ向かう', 1127, -1, 5, 180, ['itemPower'], 'iDecoy'),
+  open('iBolt', 'byakko', '御札の追加', '宝箱パネルから「御札」が出るようになる。雷で、前を行くライバル全員の足を止める（順位が低いほど出やすい）', 1103, -2, 5, 260, ['iTrap'], 'iBolt'),
+  open('iDragon', 'byakko', 'ライドラゴンの追加', '宝箱パネルから「ライドラゴン」が出るようになる。竜に乗って猛スピードで飛ぶ（順位が低いほど出やすい）', 3117, -2, 6, 3, ['iBolt'], 'iDragon', 'medal'),
+  node({ id: 'itemSlots', branch: 'byakko', name: '三つ目のポケット', desc: 'お助けエクステンションを 3 つまで持てる', icon: art(3172), x: -3, y: 5, baseCost: 3, requires: ['iMirror'], effects: [set('itemSlots', 3)], currency: 'medal', flavor: 'new' }),
 
-  // 黄竜: prize money and supply (down-right)
-  { id: 'ce', branch: 'kouryu', name: '賞金アップ', desc: 'レースで得る CE +10%', icon: cat.icons.ce, x: 1, y: 1, max: 10, baseCost: 20, growth: 1.6, requires: ['root'], effects: [mul('ce', 0.1)] },
-  { id: 'magnet', branch: 'kouryu', name: '吸い寄せ', desc: '落ちている CE を引き寄せる範囲 +30%', icon: ext(9, 2), x: 1, y: 2, max: 4, baseCost: 35, growth: 1.7, requires: ['ce'], effects: [mul('magnet', 0.3)] },
-  { id: 'xp', branch: 'kouryu', name: '場数', desc: 'レース中のチーム Lv の上がりやすさ +10%', icon: ext(8, 2), x: 2, y: 2, max: 8, baseCost: 30, growth: 1.6, requires: ['ce'], effects: [mul('xp', 0.1)] },
-  { id: 'pickups', branch: 'kouryu', name: '補給路', desc: 'コースに落ちているエクステンション +12%', icon: ext(47, 3), x: 2, y: 3, max: 5, baseCost: 80, growth: 1.8, requires: ['xp'], effects: [mul('pickups', 0.12)] },
-  { id: 'luck', branch: 'kouryu', name: '目利き', desc: 'レアリティの高いエクステンションが出やすくなる', icon: ext(36, 3), x: 3, y: 3, max: 6, baseCost: 90, growth: 1.7, requires: ['pickups'], effects: [add('luck', 0.06)] },
+  // 黄竜: prize money and experience (down-right)
+  node({ id: 'ce', branch: 'kouryu', name: '賞金アップ', desc: 'レースで得る CE +10%', icon: cat.icons.ce, x: 1, y: 1, max: 10, baseCost: 20, growth: 1.6, requires: ['root'], effects: [mul('ce', 0.1)] }),
+  node({ id: 'magnet', branch: 'kouryu', name: '吸い寄せ', desc: '落ちている経験を引き寄せる範囲 +30%', icon: art(2009), x: 1, y: 2, max: 4, baseCost: 35, growth: 1.7, requires: ['ce'], effects: [mul('magnet', 0.3)] }),
+  node({ id: 'xp', branch: 'kouryu', name: '場数', desc: 'レース中に得る経験 +10%（レベルアップが早くなる）', icon: art(2008), x: 2, y: 2, max: 8, baseCost: 30, growth: 1.6, requires: ['ce'], effects: [mul('xp', 0.1)] }),
+  open('bGyoku', 'kouryu', 'ギョクの解禁', '経験を引き寄せる範囲を広げる「ギョク」が候補に出るようになる', 3098, 1, 3, 120, ['magnet'], 'bGyoku'),
+  open('bCrown', 'kouryu', 'クラウンの解禁', '得る経験と GUM を増やす「クラウン」が候補に出るようになる', 3036, 2, 3, 160, ['xp'], 'bCrown'),
+  node({ id: 'reroll', branch: 'kouryu', name: '引き直し', desc: 'レベルアップの候補を、1 レースにつき 1 回多く引き直せる', icon: art(3111), x: 3, y: 2, max: 3, baseCost: 100, growth: 2, requires: ['xp'], effects: [add('reroll', 1)], flavor: 'new' }),
+  node({ id: 'gum', branch: 'kouryu', name: '商才', desc: 'エネミーが落とす GUM +15%', icon: cat.icons.gum, x: 3, y: 3, max: 6, baseCost: 80, growth: 1.6, requires: ['bCrown'], effects: [mul('gum', 0.15)] }),
 
   // 試練: make it harder on purpose; the best things are behind these (down)
-  { id: 'hard', branch: 'trial', name: '強敵の試練', desc: 'エネミーの HP +30%。そのかわり、得る CE +25%', icon: foe('landBoss'), x: 0, y: 2, max: 3, baseCost: 100, growth: 2.2, requires: ['strike', 'ce'], effects: [mul('enemyHp', 0.3), mul('ce', 0.25)], flavor: 'risk' },
-  { id: 'long', branch: 'trial', name: '延長戦', desc: 'コースが 12% 長くなる。その分、拾えるエクステンションも増え、得る CE +15%', icon: foe('ghost', 1), x: 0, y: 3, max: 3, baseCost: 150, growth: 2.2, requires: ['hard'], effects: [mul('course', 0.12), mul('pickups', 0.12), mul('ce', 0.15)], flavor: 'risk' },
-  { id: 'horde', branch: 'trial', name: '大群の試練', desc: 'エネミーの数 +25%。そのかわり、チーム Lv が上がりやすくなる（+25%）', icon: foe('rabbit', 5), x: 0, y: 4, max: 3, baseCost: 200, growth: 2.2, requires: ['long'], effects: [mul('enemyCount', 0.25), mul('xp', 0.25)], flavor: 'risk' },
-  { id: 'rival', branch: 'trial', name: '強豪参戦', desc: 'ライバルの足が 3% 速くなる。そのかわり、得る CE +30%', icon: foe('ghost', 0), x: 1, y: 4, max: 3, baseCost: 220, growth: 2.2, requires: ['long'], effects: [add('rival', 0.03), mul('ce', 0.3)], flavor: 'risk' },
-  { id: 'relic', branch: 'trial', name: '英雄の遺産', desc: '拾ったエクステンションが 25% の確率で Lv2 として手に入る', icon: ext(98, 4), x: 0, y: 5, max: 3, baseCost: 3, growth: 1.6, requires: ['horde'], effects: [add('gearLv2', 0.25)], currency: 'medal', flavor: 'new' },
-  { id: 'awake', branch: 'trial', name: '覚醒', desc: 'チーム Lv が上がるごとの威力の伸び +2%', icon: ext(100, 4), x: 1, y: 5, max: 3, baseCost: 3, growth: 1.6, requires: ['rival'], effects: [add('awake', 0.02)], currency: 'medal', flavor: 'new' },
+  node({ id: 'hard', branch: 'trial', name: '強敵の試練', desc: 'エネミーの HP +30%。そのかわり、得る CE +25%', icon: foe('landBoss'), x: 0, y: 2, max: 3, baseCost: 100, growth: 2.2, requires: ['strike', 'ce'], effects: [mul('enemyHp', 0.3), mul('ce', 0.25)], flavor: 'risk' }),
+  node({ id: 'long', branch: 'trial', name: '延長戦', desc: 'コースが 12% 長くなる。育つ時間がのび、宝箱パネルも増え、得る CE +15%', icon: foe('ghost', 1), x: 0, y: 3, max: 3, baseCost: 150, growth: 2.2, requires: ['hard'], effects: [mul('course', 0.12), mul('ce', 0.15)], flavor: 'risk' }),
+  node({ id: 'horde', branch: 'trial', name: '大群の試練', desc: 'エネミーの数 +25%。そのぶん経験も GUM も多く落ちる', icon: foe('rabbit', 5), x: 0, y: 4, max: 3, baseCost: 200, growth: 2.2, requires: ['long'], effects: [mul('enemyCount', 0.25)], flavor: 'risk' }),
+  node({ id: 'rival', branch: 'trial', name: '強豪参戦', desc: 'ライバルの足が 3% 速くなる。そのかわり、得る CE +30%', icon: foe('ghost', 0), x: 1, y: 4, max: 3, baseCost: 220, growth: 2.2, requires: ['long'], effects: [add('rival', 0.03), mul('ce', 0.3)], flavor: 'risk' }),
+  node({ id: 'options', branch: 'trial', name: '英雄の遺産', desc: 'レベルアップの候補が 4 枚になる', icon: art(4098), x: 0, y: 5, baseCost: 3, requires: ['horde'], effects: [set('options', 4)], currency: 'medal', flavor: 'new' }),
+  node({ id: 'awake', branch: 'trial', name: '覚醒', desc: 'チーム Lv が上がるごとに、威力 +1.5%', icon: art(4100), x: 1, y: 5, max: 3, baseCost: 3, growth: 1.6, requires: ['rival'], effects: [add('awake', 0.015)], currency: 'medal', flavor: 'new' }),
 ];
 export const NODE = new Map(SKILLS.map((n) => [n.id, n]));
 

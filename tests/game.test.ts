@@ -33,10 +33,10 @@ describe('skill tree', () => {
   it('costs rise with the level, and levels add up into stats', () => {
     const atk = NODE.get('atk')!;
     expect(costOf(atk, 3)).toBeGreaterThan(costOf(atk, 0));
-    const s = computeStats({ root: 1, atk: 5, speed: 4, kMagic: 1, hard: 1, ce: 2 });
+    const s = computeStats({ root: 1, atk: 5, speed: 4, wBook: 1, hard: 1, ce: 2 });
     expect(s.dmg).toBeCloseTo(1.4);
     expect(s.speed).toBeCloseTo(1.1);
-    expect(s.kMagic).toBe(1);
+    expect(s.wBook).toBe(1);
     expect(s.enemyHp).toBeCloseTo(1.3);
     expect(s.ce).toBeCloseTo(1.45);
     expect(computeStats({ root: 1 })).toEqual(BASE);
@@ -77,5 +77,30 @@ describe('sea', () => {
       const ty = Math.floor((d.y - 20) / 48);
       expect(seen[ty * W + tx], `${d.kind} at ${tx},${ty}`).toBe(1);
     }
+  });
+});
+
+describe('gear', () => {
+  it('every weapon, boost and helper item has art and five tiers', async () => {
+    const { ROSTER, ITEMS, iconOf, itemImg } = await import('../src/game/roster');
+    for (const d of ROSTER) {
+      expect(d.tiers.length).toBe(5);
+      for (let lv = 1; lv <= 5; lv++) expect(iconOf(d, lv), `${d.id} Lv${lv}`).toMatch(/Extensions\/\d+\.png$/);
+      if (d.key) expect(d.key in BASE, `${d.id} key ${d.key}`).toBe(true);
+    }
+    for (const i of ITEMS) {
+      expect(itemImg(i), i.id).toContain(String(i.icon));
+      if (i.key) expect(i.key in BASE, `${i.id} key ${i.key}`).toBe(true);
+    }
+  });
+  it('the back of the field draws the strong items', async () => {
+    const { rollItem } = await import('../src/game/run');
+    const all = { ...BASE, iTrap: 1, iDecoy: 1, iMirror: 1, iBolt: 1, iDragon: 1 };
+    const count = (back: number) => {
+      let n = 0;
+      for (let i = 0; i < 2000; i++) if (['bolt', 'dragon'].includes(rollItem(back, all).id)) n++;
+      return n;
+    };
+    expect(count(1)).toBeGreaterThan(count(0) * 3);
   });
 });

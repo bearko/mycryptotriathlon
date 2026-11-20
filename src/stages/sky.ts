@@ -6,7 +6,8 @@ import { sample, sfx } from '../core/audio';
 import { cat, traitsOf, type Traits } from '../core/catalog';
 import { input } from '../core/input';
 import { clamp, lerp, makeRng, TAU, type Rng } from '../core/util';
-import { DOWN_PENALTY, fighterStats, levelMul, type FighterStats, type Run } from '../game/run';
+import { DOWN_PENALTY, fighterStats, levelMul, skyKind, type FighterStats, type Run } from '../game/run';
+import { iconOf } from '../game/roster';
 import type { Host, Stage } from './stage';
 
 const BX = 12;
@@ -174,15 +175,16 @@ export class SkyStage implements Stage {
     this.ship.add(pilotS);
     const hard: [number, number, number][] = [[-2.5, 0.35, 0.8], [2.5, 0.35, 0.8], [-1.3, 0.45, 1.2], [1.3, 0.45, 1.2]];
     this.run.fighter.forEach((id, i) => {
-      const slot = this.run.slots.find((s) => s.ext.id === id);
+      const slot = this.run.slots.find((s) => s.def.id === id);
       if (!slot || i > 3) return;
-      const s = this.sprite(slot.ext.img, 0.95);
+      const art = iconOf(slot.def, slot.lv);
+      const s = this.sprite(art, 0.95);
       s.position.set(...hard[i]);
       this.ship.add(s);
-      if (slot.ext.kind === 'orbit') {
+      if (skyKind(slot.def) === 'orbit') {
         const n = 2 + Math.floor(this.st.bits / 30);
         for (let k = this.bitSprites.length; k < Math.min(5, n); k++) {
-          const b = this.sprite(slot.ext.img, 1.3);
+          const b = this.sprite(art, 1.3);
           this.scene.add(b);
           this.bitSprites.push(b);
         }
@@ -249,7 +251,7 @@ export class SkyStage implements Stage {
 
     this.resize();
     window.addEventListener('resize', this.onResize);
-    host.hud.slots(this.run.slots.filter((s) => this.run.fighter.includes(s.ext.id)));
+    host.hud.slots(this.run.slots.filter((s) => this.run.fighter.includes(s.def.id)));
     host.hud.objective('敵を撃ち落として、宇宙の果てへ');
     this.place(0);
   }

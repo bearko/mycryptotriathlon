@@ -5,7 +5,7 @@ import { sample, sfx } from '../core/audio';
 import { cat, type EnemyArt } from '../core/catalog';
 import { input } from '../core/input';
 import { clamp, dist2, hash2, mixColor, rint, TAU } from '../core/util';
-import { armorHp, levelMul, rollExt, xpNeed } from '../game/run';
+import { levelMul, xpNeed } from '../game/run';
 import { Arena, type Enemy } from './arena';
 import type { Host } from './stage';
 
@@ -177,7 +177,7 @@ export class SeaStage extends Arena {
   }
 
   protected fullHp(): number {
-    return Math.round(64 * this.traits.hp + armorHp(this.run) * 0.3);
+    return Math.round((64 * this.traits.hp + this.boosts.hp * 0.3) * this.st.hp);
   }
 
   private follow(k: number): void {
@@ -276,10 +276,7 @@ export class SeaStage extends Arena {
         }
       }
       const l = Math.hypot(ax, ay) || 1;
-      this.shots.push({
-        x: h.x, y: h.y, vx: (ax / l) * 900, vy: (ay / l) * 900, r: 9, dmg: 30 * this.traits.phy * levelMul(this.run.level),
-        pierce: 1, life: 0.5, type: 'harpoon', color: '#e9f6ff', hit: new Set(), target: null, blast: 0, kb: 160, ox: h.x, oy: h.y,
-      });
+      this.arsenal.shoot(h.x, h.y, (ax / l) * 900, (ay / l) * 900, 30 * this.traits.phy * levelMul(this.run.level), 1, 0.5);
       this.harpoonCd = 0.55;
       sfx('harpoon');
     }
@@ -356,6 +353,7 @@ export class SeaStage extends Arena {
     hud.sub(1 - this.harpoonCd / 0.55);
     hud.progress(clamp(h.y / end.y, 0, 1), this.gates.map((g) => g.y / end.y));
     hud.level(this.run.level, this.run.xp / xpNeed(this.run.level));
+    hud.gum(this.run.gum);
     const b = this.bossRef;
     hud.boss(b && !b.dead ? b.name : null, b ? b.hp / b.maxHp : 0);
   }
@@ -367,14 +365,14 @@ export class SeaStage extends Arena {
     sample('chest', 0.7);
     this.puff(d.x, d.y - 10, '#ffe45c', 16);
     if (d.kind === 'chest') {
-      this.gain(rollExt(this.run, this.rng, 0.4 + d.zone * 0.2), d.x, d.y - 20);
+      this.grant(1);
       h.hp = Math.min(h.maxHp, h.hp + 15);
     } else if (d.kind === 'relic') {
       const gate = this.gates[d.zone];
       gate.open = true;
       h.hp = h.maxHp;
       sfx('gate');
-      this.gain(rollExt(this.run, this.rng, 0.9), d.x, d.y - 20);
+      this.grant(1);
       hud.banner('門が開いた！', 'O₂ 全回復', 'good');
       hud.objective(d.zone === 2 ? '最深部へ！' : '門を抜けて、さらに深くへ');
       this.shake = 10;
@@ -725,7 +723,7 @@ export class SeaStage extends Arena {
       for (const v of this.vents) hole(v.x - this.camX, v.y - this.camY, 70, 0.6);
       for (const gt of this.gates) if (!gt.open) hole((gt.x0 + gt.x1) / 2 - this.camX, gt.y - this.camY, 200, 0.7);
       for (const b of this.ebullets) hole(b.x - this.camX, b.y - this.camY, 34, 0.9);
-      for (const s of this.shots) hole(s.x - this.camX, s.y - this.camY, 40, 0.7);
+      for (const s of this.arsenal.projs) hole(s.x - this.camX, s.y - this.camY, 40, 0.7);
       if (this.boss && !this.boss.dead) hole(this.boss.x - this.camX, this.boss.y - this.camY, 190, 0.85);
       g.imageSmoothingEnabled = true;
       g.drawImage(this.dark, 0, 0, dw * q, dh * q);

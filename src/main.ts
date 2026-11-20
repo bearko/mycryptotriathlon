@@ -9,14 +9,15 @@ import { initInput, input, pollInput, setPad } from './core/input';
 import { makeRng } from './core/util';
 import { earn, meta, saveMeta, setMetaForTest } from './game/meta';
 import { payout } from './game/reward';
-import { COURSE_SEED, newRun, rollExt, STAGES, takeExt, type Run, type StageId } from './game/run';
+import { COURSE_SEED, drawCards, newRun, STAGES, takeCard, type Run, type StageId } from './game/run';
+import { stats } from './game/meta';
 import { LandStage } from './stages/land';
 import { SeaStage } from './stages/sea';
 import type { Host, Stage, StageResult } from './stages/stage';
 import { treeScreen } from './ui/tree';
 import { createHud } from './ui/hud';
 import {
-  clearCard, hangarScreen, initScreens, introCard, outScreen, pauseScreen, resultScreen, screenLayer, selectScreen, titleScreen,
+  clearCard, hangarScreen, initScreens, introCard, levelUpScreen, outScreen, pauseScreen, resultScreen, screenLayer, selectScreen, titleScreen,
 } from './ui/screens';
 
 const app = document.getElementById('app')!;
@@ -88,11 +89,17 @@ document.addEventListener('visibilitychange', () => {
 async function playStage(run: Run, index: number): Promise<'done' | 'restart' | 'quit'> {
   const id = STAGES[index];
   if (id === 'sky') await hangarScreen(run, debug.quick);
-  const host: Host = { run, seed: COURSE_SEED, mount, hud, bot: debug.bot };
+  const host: Host = {
+    run, seed: COURSE_SEED, mount, hud, bot: debug.bot,
+    pick: (r) => levelUpScreen(r, debug.bot),
+    items: (r) => hud.items(r.items, stats().itemSlots),
+  };
   baseTime = run.splits.reduce((a, b) => a + b, 0);
   stage = await makeStage(id, host);
   hud.show(id, run.splits);
   hud.clock(0, baseTime);
+  hud.slots(run.slots);
+  if (id === 'land') host.items(run);
   playBgm(id);
   setPad(true, PAD[id][0], PAD[id][1]);
   await introCard(id, index, run, debug.quick);
@@ -116,9 +123,11 @@ async function playStage(run: Run, index: number): Promise<'done' | 'restart' | 
 
 /** Debug: start in the middle of a run with plausible gear. */
 function seedGear(run: Run, n: number): void {
-  const rng = makeRng(99);
-  for (let i = 0; i < n; i++) takeExt(run, rollExt(run, rng, 0.5));
-  run.level = 1 + Math.floor(n / 2);
+  for (let i = 0; i < n; i++) {
+    const cards = drawCards(run);
+    if (cards.length) takeCard(run, cards[0]);
+  }
+  run.level = 1 + n;
 }
 
 /** One attempt: as far as the team gets. Always ends in the skill tree. */

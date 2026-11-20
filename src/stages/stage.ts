@@ -18,6 +18,7 @@ export interface Hud {
   /** Place in the race, and how many of the qualifying spots are taken. */
   rank(place: number, total: number, passed: number, quota: number): void;
   fouls(n: number, limit: number): void;
+  gum(n: number): void;
   /** Every runner's progress along the course (0..1); `me` is the player's. */
   dots(all: number[], me: number): void;
   /** The passive-skill cut-in. */
@@ -31,6 +32,10 @@ export interface Host {
   hud: Hud;
   /** Debug: let the game play itself. */
   bot: boolean;
+  /** Shows the level-up cards and resolves once one has been taken. */
+  pick(run: Run): Promise<void>;
+  /** Draws the stock of helper items again. */
+  items(run: Run): void;
 }
 
 export interface Stage {

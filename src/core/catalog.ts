@@ -22,6 +22,7 @@ export interface EnemyArt { id: number; name: string; img: string }
 export const cat = raw as unknown as {
   heroes: Hero[];
   exts: Ext[];
+  extArt: Record<string, { name: string; img: string }>;
   enemies: Record<string, EnemyArt[]>;
   bg: Record<string, string>;
   fx: Record<string, string>;
