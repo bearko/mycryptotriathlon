@@ -104,3 +104,27 @@ describe('gear', () => {
     expect(count(1)).toBeGreaterThan(count(0) * 3);
   });
 });
+
+describe('tuning', () => {
+  it('sells every extension and never spends more than it has', async () => {
+    const { newRun, takeCard, drawCards } = await import('../src/game/run');
+    const { autoTune, gumLeft, openTune, spent, tuneStats, TUNE_MAX } = await import('../src/game/tuning');
+    const run = newRun([cat.heroes[0], cat.heroes[1], cat.heroes[2]]);
+    for (let i = 0; i < 8; i++) {
+      const cards = drawCards(run);
+      if (cards.length) takeCard(run, cards[0]);
+    }
+    run.gum = 300;
+    const t = openTune(run);
+    expect(t.sold.length).toBe(run.slots.length);
+    expect(t.budget).toBeGreaterThan(300);
+    const bare = tuneStats(run);
+    autoTune(run);
+    expect(spent(t)).toBeLessThanOrEqual(t.budget);
+    expect(gumLeft(t)).toBeGreaterThanOrEqual(0);
+    for (const r of Object.values(t.ranks)) expect(r).toBeLessThanOrEqual(TUNE_MAX);
+    const tuned = tuneStats(run);
+    expect(tuned.hp).toBeGreaterThan(bare.hp);
+    expect(tuned.power).toBeGreaterThan(bare.power);
+  });
+});

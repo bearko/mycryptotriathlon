@@ -6,7 +6,7 @@
 - サイトを開くと `index.html` → `src/main.ts`。公開は Cloudflare Workers の静的配信（`wrangler.jsonc`）。本番のブランチは `main`。
 - 構成：
   - `src/core/` 入力（キーボード・マウス・タッチ）、音、画像、カタログ、乱数
-  - `src/game/` ルール：`roster.ts`（武器 10 種・強化 11 種・お助けエクステンションの一覧と数値）、`run.ts`（1 回の挑戦・レベルアップのカード・経験と GUM）、`meta.ts`（スキルツリー・メダル・セーブ）、`reward.ts`（CE）
+  - `src/game/` ルール：`roster.ts`（武器 10 種・強化 11 種・お助けエクステンションの一覧と数値）、`run.ts`（1 回の挑戦・レベルアップのカード・経験と GUM）、`tuning.ts`（空の機体：売却・改造ランク・武装）、`meta.ts`（スキルツリー・メダル・セーブ）、`reward.ts`（CE）
   - `src/stages/` レース：`arena.ts`（2D の共通部分：走者・エネミー・気絶・反則・審判・パッシブ）、`weapons.ts`（武器の動き）、`land.ts`、`sea.ts`、`sky.ts`（three.js。ここだけ別チャンク）
   - `src/ui/` 画面：`hud.ts`（順位・実況・ゲージ）、`screens.ts`（タイトル・走順・結果など）、`tree.ts`（スキルツリー）
 - 素材は `vendor/mycryptoheroes`（サブモジュール）から `scripts/sync-assets.mjs` が使うものだけを `public/mch/` に写し、`src/generated/catalog.json` を作る（どちらも Git には入れない）。ヒーローのパッシブスキルの読み取り（発動条件と効果の種類）もここ。
@@ -20,3 +20,4 @@
 - 陸の順位はゴールライン（`len`）を越えたときに決まる。最後の関門はその `LAST_RUN` 手前。ゴール後は `outro`（`arena.ts`）になり、時計を止めたまま `afterglow` でヒーローが走り続け、`main.ts` が `goalScreen` を出す（押すと次へ）。`?quick=1` のときは待たずに進む。
 - レベルアップのカードは、押すのをやめて少し待つまで選べない（`levelUpScreen` の `armed`）。連打対策なので外さない。
 - 海は 30 組・先着 10 組（`sea.ts`）。門は走者ごと（`Runner.gate`）で、その深さの遺物を自分で掘ると通れる。ライバルの道順は `plan`、動きは `rivalAI`（画面の外は壁もエネミーも見ない簡略版）。難度は `PACE_MIN`・`PACE_SPAN`・`DIG_MIN`・`DIG_SPAN`。
+- 空の機体は `src/game/tuning.ts`（売却・ランクの値段・武装・`tuneStats`）と `screens.ts` の `tuneScreen`。空のレースが読むのは `tuneStats(run)` だけで、陸・海のエクステンション（`run.slots`）は空では使わない。

@@ -1,7 +1,10 @@
 // Everything outside the races: title, relay line-up, the cards between races, the hangar, the result.
 
 import { sample, sfx, unlockAudio } from '../core/audio';
-import { cat, KIND_SKY, RARITY_COLOR, traitsOf, type Hero } from '../core/catalog';
+import {
+  ARM_SLOTS, autoTune, DEFAULT_ARM, gumLeft, openTune, rankCost, rankSpan, rowValue, SKY_ARMS, TUNE_MAX, TUNE_ROWS, tuneRate, type ArmKind, type TuneId,
+} from '../game/tuning';
+import { cat, RARITY_COLOR, traitsOf, type Hero } from '../core/catalog';
 import { iconOf, nameOf, type Def } from '../game/roster';
 import { input } from '../core/input';
 import { commit, save } from '../core/save';
@@ -10,7 +13,7 @@ import type { Payout } from '../game/reward';
 import type { StageResult } from '../stages/stage';
 import { fmtDelta, fmtTime } from '../core/util';
 import {
-  autoFighter, drawCards, fighterStats, maxLvOf, skyKind, STAGE_EN, STAGE_NAME, STAGES, takeCard, totalTime, type Run, type StageId,
+  drawCards, maxLvOf, STAGE_EN, STAGE_NAME, STAGES, takeCard, totalTime, type Run, type StageId,
 } from '../game/run';
 
 let layer: HTMLElement;
@@ -310,24 +313,92 @@ export async function clearCard(index: number, run: Run, res?: StageResult): Pro
 
 // ------------------------------------------------------------------ hangar
 /** Choose up to four pieces of gear to bolt onto the fighter. */
-export function hangarScreen(run: Run, quick: boolean): Promise<void> {
-  run.fighter = autoFighter(run);
-  if (quick) return Promise.resolve();
+/**
+ * The hangar before the sky. Every extension is sold for GUM first; the GUM then buys ranks for the hull
+ * (one row per stat: pick a rank with ◀ ▶, see the number it will become, confirm the lot) and sky-only weapons.
+ * The clock keeps running while the player decides. Resolves with the seconds spent here.
+ */
+export function tuneScreen(run: Run, quick: boolean): Promise<number> {
+  const t = openTune(run);
+  if (quick) {
+    autoTune(run);
+    return Promise.resolve(0);
+  }
   const pilot = run.heroes[2];
-  const el = open('hangar', `
-    <header><h2>戦闘機を組み立てる</h2><p>ここまでに集めたエクステンションから 4 つまで搭載（タイムは止まっています）</p></header>
-    <div class="hangar-main">
-      <div class="ship" id="g-ship"></div>
-      <div class="parts" id="g-parts"></div>
+  const el = open('tune', `
+    <div class="tn-top">
+      <p class="tn-title"><b>TUNING</b><span>${pilot.name} 機</span></p>
+      <p class="tn-rate">改造度 <b id="tn-rate">0%</b></p>
+      <p class="tn-gum"><img src="${cat.icons.gum}" alt=""><b id="tn-gum">0</b><small>GUM</small></p>
+      <p class="tn-time">TIME <b id="tn-time">0:00.0</b></p>
     </div>
-    <div class="specs" id="g-specs"></div>
-    <footer><button class="btn ghost" id="g-auto">おまかせ</button><button class="btn big" id="g-go">発進！</button></footer>`);
-  const ship = el.querySelector<HTMLElement>('#g-ship')!;
-  const parts = el.querySelector<HTMLElement>('#g-parts')!;
-  const specs = el.querySelector<HTMLElement>('#g-specs')!;
+    <div class="tn-main">
+      <div class="tn-panel tn-rows">
+        <p class="tn-head"><span>改造項目</span><em>◀ ▶ でランクを選び「実行」で確定</em></p>
+        <div id="tn-rows"></div>
+      </div>
+      <div class="tn-side">
+        <div class="tn-ship" id="tn-ship"></div>
+        <div class="tn-panel tn-arms">
+          <p class="tn-head"><span>武装</span><em>追加は ${ARM_SLOTS} つまで</em></p>
+          <div id="tn-arms"></div>
+        </div>
+      </div>
+    </div>
+    <div class="tn-foot">
+      <p class="tn-cost"><span>消費GUM</span><b id="tn-use">0</b></p>
+      <p class="tn-cost"><span>残GUM</span><b id="tn-left">0</b></p>
+      <button class="btn" id="tn-apply" disabled>実行</button>
+      <button class="btn ghost small" id="tn-auto">おまかせ</button>
+      <button class="btn big" id="tn-go">発進！</button>
+    </div>
+    <div class="tn-sell" id="tn-sell">
+      <div class="tn-sellbox">
+        <h2>エクステンションを GUM に換える</h2>
+        <p>陸と海で集めた品は、空へは持ちこめない。すべて売って、機体の改造と武装にあてる</p>
+        <ul>${t.sold.map((s, i) => `<li style="animation-delay:${i * 60}ms;--rar:${RARITY_COLOR[s.lv]}"><img src="${s.img}" alt=""><span>${s.name}</span><b>+${s.gum}</b></li>`).join('')}
+          <li class="held" style="animation-delay:${t.sold.length * 60}ms"><img src="${cat.icons.gum}" alt=""><span>レースで拾った GUM</span><b>+${t.earned}</b></li></ul>
+        <p class="tn-total"><img src="${cat.icons.gum}" alt=""> 合計 <b>${t.budget}</b> GUM</p>
+        <button class="btn big" id="tn-sold">チューニングへ</button>
+      </div>
+    </div>`);
+  const $ = <T extends HTMLElement>(q: string) => el.querySelector<T>(q)!;
+  const rowsEl = $('#tn-rows');
+  const armsEl = $('#tn-arms');
+  const shipEl = $('#tn-ship');
+  const apply = $<HTMLButtonElement>('#tn-apply');
+  /** Ranks picked but not yet confirmed. */
+  const want: Record<TuneId, number> = { ...t.ranks };
+  let cursor = 0;
+  const pending = () => TUNE_ROWS.reduce((a, r) => a + rankSpan(t.ranks[r.id], want[r.id]), 0);
   const paint = () => {
-    const picked = run.fighter.map((id) => run.slots.find((s) => s.def.id === id)!).filter(Boolean);
-    ship.innerHTML = `
+    const use = pending();
+    const left = gumLeft(t) - use;
+    rowsEl.innerHTML = TUNE_ROWS.map((r, i) => {
+      const cur = t.ranks[r.id];
+      const nw = want[r.id];
+      const next = nw < TUNE_MAX ? rankCost(nw) : 0;
+      const segs = Array.from({ length: TUNE_MAX }, (_, k) => `<s class="${k < cur ? 'on' : k < nw ? 'new' : ''}" style="--k:${k}"></s>`).join('');
+      return `<div class="tn-row${i === cursor ? ' sel' : ''}${nw > cur ? ' changed' : ''}" data-id="${r.id}" style="--c:${r.color}">
+        <span class="tn-lab">${r.name}<small>${r.note}</small></span>
+        <div class="tn-rank"><small>RANK</small>
+          <button data-d="-1" ${nw <= cur ? 'disabled' : ''} aria-label="下げる">◀</button><b>${nw}</b><button data-d="1" ${nw >= TUNE_MAX || next > left ? 'disabled' : ''} aria-label="上げる">▶</button>
+        </div>
+        <div class="tn-val">
+          <p><span>${rowValue(run, r.id, cur)}</span><i>»</i><span class="${nw > cur ? 'up' : ''}">${rowValue(run, r.id, nw)}${nw > cur ? ' ▲' : ''}</span>
+            <em>${nw >= TUNE_MAX ? 'MAX' : `次 ${next}`}</em></p>
+          <div class="tn-segs">${segs}</div>
+        </div>
+      </div>`;
+    }).join('');
+    armsEl.innerHTML = `<div class="tn-arm std"><img src="${DEFAULT_ARM.img}" alt=""><span><b>${DEFAULT_ARM.name}</b><small>${DEFAULT_ARM.desc}</small></span><em>標準</em></div>` +
+      SKY_ARMS.map((a) => {
+        const on = t.arms.includes(a.id);
+        const can = on || (t.arms.length < ARM_SLOTS && a.price <= left);
+        return `<button class="tn-arm${on ? ' on' : ''}" data-arm="${a.id}" ${can ? '' : 'disabled'}>
+          <img src="${a.img}" alt=""><span><b>${a.name}</b><small>${a.desc}</small></span><em>${on ? '装備中' : a.price}</em></button>`;
+      }).join('');
+    shipEl.innerHTML = `
       <svg viewBox="0 0 200 150" class="hull" aria-hidden="true">
         <polygon points="100,8 118,70 100,128 82,70" fill="#e8eef7"/>
         <polygon points="100,8 118,70 100,60" fill="#bcc8da"/>
@@ -337,54 +408,100 @@ export function hangarScreen(run: Run, quick: boolean): Promise<void> {
         <polygon points="96,40 104,40 108,64 92,64" fill="#2b3350"/>
       </svg>
       <img class="pilot" src="${pilot.img}" alt="">
-      ${[0, 1, 2, 3].map((i) => {
-        const s = picked[i];
-        return `<div class="hard hp${i}${s ? ' set' : ''}" style="${s ? `--rar:${RARITY_COLOR[s.lv]}` : ''}">${s ? `<img src="${iconOf(s.def, s.lv)}" alt="">` : ''}</div>`;
-      }).join('')}`;
-    parts.innerHTML = run.slots.map((s) => {
-      const on = run.fighter.includes(s.def.id);
-      return `<button class="part${on ? ' on' : ''}" data-id="${s.def.id}" style="--rar:${RARITY_COLOR[s.lv]};--kind:${s.def.color}">
-        <img src="${iconOf(s.def, s.lv)}" alt="">
-        <span class="pn">${nameOf(s.def, s.lv)}<small>Lv${s.lv}</small></span>
-        <span class="pk">${KIND_SKY[skyKind(s.def)]}</span>
-      </button>`;
-    }).join('') || '<p class="none">エクステンションなし（基本のレーザーだけで飛びます）</p>';
-    const st = fighterStats(run);
-    const row = (label: string, v: number, max: number) =>
-      `<div class="spec"><span>${label}</span><div><i style="width:${Math.min(100, (v / max) * 100)}%"></i></div></div>`;
-    specs.innerHTML =
-      row('火力', 14 + st.laser + st.spread * 0.9, 110) +
-      row('誘導', st.missile + st.pulse * 0.6, 80) +
-      row('速度', 10 + st.engine, 70) +
-      row('守り', 12 + st.armor + st.bits * 0.8, 80);
+      <img class="tn-hard nose" src="${DEFAULT_ARM.img}" alt="">
+      ${t.arms.map((id, i) => `<img class="tn-hard h${i}" src="${SKY_ARMS.find((a) => a.id === id)!.img}" alt="">`).join('')}`;
+    $('#tn-gum').textContent = String(gumLeft(t));
+    $('#tn-use').textContent = String(use);
+    $('#tn-left').textContent = String(left);
+    $('#tn-left').classList.toggle('low', left < 40);
+    $('#tn-rate').textContent = `${tuneRate(t)}%`;
+    apply.disabled = use <= 0;
+  };
+  const step = (id: TuneId, d: number) => {
+    const nw = want[id] + d;
+    if (nw < t.ranks[id] || nw > TUNE_MAX) return;
+    if (d > 0 && rankCost(want[id]) > gumLeft(t) - pending()) {
+      sfx('hit');
+      return;
+    }
+    want[id] = nw;
+    sfx(d > 0 ? 'ui' : 'uiBack');
+    paint();
+  };
+  const commit = (loud: boolean) => {
+    if (pending() <= 0) return;
+    for (const r of TUNE_ROWS) t.ranks[r.id] = want[r.id];
+    if (loud) {
+      sfx('levelup');
+      sample('buff', 0.5);
+      el.classList.remove('done');
+      void el.offsetWidth;
+      el.classList.add('done');
+      window.setTimeout(() => el.classList.remove('done'), 500);
+    }
+    paint();
   };
   paint();
-  parts.addEventListener('click', (e) => {
-    const b = (e.target as HTMLElement).closest<HTMLElement>('.part');
-    if (!b) return;
-    const id = b.dataset.id!;
-    const at = run.fighter.indexOf(id);
+  rowsEl.addEventListener('click', (e) => {
+    const row = (e.target as HTMLElement).closest<HTMLElement>('.tn-row');
+    if (!row) return;
+    cursor = TUNE_ROWS.findIndex((r) => r.id === row.dataset.id);
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button');
+    if (b && !b.disabled) step(row.dataset.id as TuneId, Number(b.dataset.d));
+    else paint();
+  });
+  armsEl.addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLButtonElement>('button.tn-arm');
+    if (!b || b.disabled) return;
+    const id = b.dataset.arm as ArmKind;
+    const at = t.arms.indexOf(id);
     if (at >= 0) {
-      run.fighter.splice(at, 1);
+      t.arms.splice(at, 1);
       sfx('uiBack');
-    } else if (run.fighter.length < 4) {
-      run.fighter.push(id);
-      sfx('ui');
     } else {
-      sfx('hit');
+      t.arms.push(id);
+      sample('chest', 0.5);
     }
     paint();
   });
-  el.querySelector('#g-auto')!.addEventListener('click', () => {
-    run.fighter = autoFighter(run);
-    sfx('ui');
+  apply.addEventListener('click', () => commit(true));
+  $('#tn-auto').addEventListener('click', () => {
+    for (const r of TUNE_ROWS) want[r.id] = t.ranks[r.id];
+    autoTune(run);
+    for (const r of TUNE_ROWS) want[r.id] = t.ranks[r.id];
+    sfx('levelup');
     paint();
   });
+  const onKey = (e: KeyboardEvent) => {
+    if (!$('#tn-sell').hidden) return;
+    const id = TUNE_ROWS[cursor].id;
+    if (e.code === 'ArrowUp' || e.code === 'KeyW') cursor = (cursor + TUNE_ROWS.length - 1) % TUNE_ROWS.length;
+    else if (e.code === 'ArrowDown' || e.code === 'KeyS') cursor = (cursor + 1) % TUNE_ROWS.length;
+    else if (e.code === 'ArrowLeft' || e.code === 'KeyA') return step(id, -1);
+    else if (e.code === 'ArrowRight' || e.code === 'KeyD') return step(id, 1);
+    else if (e.code === 'Enter') return commit(true);
+    else return;
+    sfx('ui', 0.05);
+    paint();
+  };
+  window.addEventListener('keydown', onKey);
+  $('#tn-sold').addEventListener('click', () => {
+    sample('chest', 0.6);
+    $('#tn-sell').hidden = true;
+  });
+  const began = performance.now();
+  const clock = window.setInterval(() => {
+    $('#tn-time').textContent = fmtTime((performance.now() - began) / 1000);
+  }, 100);
   return new Promise((res) => {
-    el.querySelector('#g-go')!.addEventListener('click', () => {
+    $('#tn-go').addEventListener('click', () => {
+      commit(false);
+      window.clearInterval(clock);
+      window.removeEventListener('keydown', onKey);
+      t.time = (performance.now() - began) / 1000;
       sfx('go');
       close(el);
-      res();
+      res(t.time);
     });
   });
 }

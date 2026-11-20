@@ -6,8 +6,8 @@ import { sample, sfx } from '../core/audio';
 import { cat, traitsOf, type Traits } from '../core/catalog';
 import { input } from '../core/input';
 import { clamp, lerp, makeRng, TAU, type Rng } from '../core/util';
-import { DOWN_PENALTY, fighterStats, levelMul, skyKind, type FighterStats, type Run } from '../game/run';
-import { iconOf } from '../game/roster';
+import { DOWN_PENALTY, levelMul, type Run } from '../game/run';
+import { DEFAULT_ARM, SKY_ARMS, tuneStats, type FighterStats } from '../game/tuning';
 import type { Host, Stage } from './stage';
 
 const BX = 12;
@@ -132,8 +132,8 @@ export class SkyStage implements Stage {
     const pilot = this.run.heroes[2];
     this.traits = traitsOf(pilot);
     this.rng = makeRng(host.seed + 37);
-    this.st = fighterStats(this.run);
-    this.maxHp = Math.round(100 * this.traits.hp + this.st.armor * 1.6 + this.st.bits * 0.4);
+    this.st = tuneStats(this.run);
+    this.maxHp = this.st.hp;
     this.hp = this.maxHp;
     this.baseSpeed = 28 * (0.9 + 0.1 * this.traits.agi) + Math.min(9, this.st.engine * 0.13);
 
@@ -174,17 +174,20 @@ export class SkyStage implements Stage {
     pilotS.position.set(0, 0.8, 0.1);
     this.ship.add(pilotS);
     const hard: [number, number, number][] = [[-2.5, 0.35, 0.8], [2.5, 0.35, 0.8], [-1.3, 0.45, 1.2], [1.3, 0.45, 1.2]];
-    this.run.fighter.forEach((id, i) => {
-      const slot = this.run.slots.find((s) => s.def.id === id);
-      if (!slot || i > 3) return;
-      const art = iconOf(slot.def, slot.lv);
-      const s = this.sprite(art, 0.95);
+    // the weapons bought in the hangar, bolted on (the laser that comes with the hull sits on the nose)
+    const nose = this.sprite(DEFAULT_ARM.img, 0.8);
+    nose.position.set(0, 0.25, -1.2);
+    this.ship.add(nose);
+    (this.run.tune?.arms ?? []).forEach((id, i) => {
+      const arm = SKY_ARMS.find((a) => a.id === id);
+      if (!arm || i > 3) return;
+      const s = this.sprite(arm.img, 0.95);
       s.position.set(...hard[i]);
       this.ship.add(s);
-      if (skyKind(slot.def) === 'orbit') {
+      if (id === 'bits') {
         const n = 2 + Math.floor(this.st.bits / 30);
         for (let k = this.bitSprites.length; k < Math.min(5, n); k++) {
-          const b = this.sprite(art, 1.3);
+          const b = this.sprite(arm.img, 1.3);
           this.scene.add(b);
           this.bitSprites.push(b);
         }
@@ -251,7 +254,7 @@ export class SkyStage implements Stage {
 
     this.resize();
     window.addEventListener('resize', this.onResize);
-    host.hud.slots(this.run.slots.filter((s) => this.run.fighter.includes(s.def.id)));
+    host.hud.slots([]);
     host.hud.objective('敵を撃ち落として、宇宙の果てへ');
     this.place(0);
   }
@@ -411,7 +414,7 @@ export class SkyStage implements Stage {
   /** The enemy the nose is roughly pointing at (aim assist). */
   private aimTarget(): Foe | null {
     let best: Foe | null = null;
-    let bd = 5.2;
+    let bd = this.st.aim;
     for (const f of this.foes) {
       if (f.dead || f.z > -6 || f.z < -190) continue;
       const d = Math.hypot(f.x - this.px, f.y - this.py) - f.r * 0.7;
@@ -426,8 +429,8 @@ export class SkyStage implements Stage {
   private fireGuns(dt: number, target: Foe | null): void {
     const st = this.st;
     const lv = levelMul(this.run.level);
-    const phys = this.traits.phy * lv;
-    const mag = this.traits.int * lv;
+    const phys = this.traits.phy * lv * st.power;
+    const mag = this.traits.int * lv * st.power;
     this.fireT -= dt;
     if (this.fireT <= 0) {
       this.fireT = 1 / Math.min(11, 5 + st.laser / 9);
@@ -554,7 +557,7 @@ export class SkyStage implements Stage {
 
   private hurt(dmg: number): void {
     if (this.inv > 0 || this.rollT > 0 || this.finished) return;
-    this.hp -= dmg;
+    this.hp -= dmg * this.st.guard;
     this.inv = 1;
     this.shake = 0.7;
     sfx('hurt');
@@ -613,7 +616,7 @@ export class SkyStage implements Stage {
     if (want && !this.boosting) sfx('boost', 0.3);
     this.boosting = want;
     if (this.boosting) this.boost = Math.max(0, this.boost - 0.36 * dt);
-    else this.boost = Math.min(1, this.boost + (0.11 + this.st.engine / 320) * dt);
+    else this.boost = Math.min(1, this.boost + (0.11 + this.st.en) * dt);
     const target = this.baseSpeed * (this.boosting ? 1.8 : 1);
     this.speed = lerp(this.speed, target, 1 - Math.pow(0.02, dt));
     if (!this.hold) this.dist += this.speed * dt;

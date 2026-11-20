@@ -1,10 +1,11 @@
 // State of one attempt: three heroes in relay, the gear they carry (it is the baton), experience and GUM.
 // Gear is gained by levelling up: each level offers a few cards, and one is taken.
 
-import { type Hero, type Kind, traitsOf } from '../core/catalog';
+import { type Hero, traitsOf } from '../core/catalog';
 import { makeRng, type Rng } from '../core/util';
 import { stats, type Stats } from './meta';
 import { DEF, ITEMS, MAX_LV, ROSTER, type Def, type Item } from './roster';
+import type { Tune } from './tuning';
 
 export const STAGES = ['land', 'sea', 'sky'] as const;
 export type StageId = (typeof STAGES)[number];
@@ -21,8 +22,8 @@ export interface Slot { def: Def; lv: number }
 export interface Run {
   heroes: [Hero, Hero, Hero];
   slots: Slot[];
-  /** Ids of the gear bolted onto the fighter (set in the hangar). */
-  fighter: string[];
+  /** The fighter built in the hangar before the sky (null until then). */
+  tune: Tune | null;
   level: number;
   xp: number;
   gum: number;
@@ -47,7 +48,7 @@ export const maxLvOf = (st: Stats = stats()) => Math.min(MAX_LV, st.maxLv);
 export function newRun(heroes: [Hero, Hero, Hero], seed = COURSE_SEED): Run {
   const st = stats();
   const run: Run = {
-    heroes, slots: [], fighter: [], level: 1, xp: 0, gum: 0, pending: 0, rerolls: st.reroll, items: [],
+    heroes, slots: [], tune: null, level: 1, xp: 0, gum: 0, pending: 0, rerolls: st.reroll, items: [],
     splits: [], downs: 0, kills: 0, rng: makeRng(seed),
   };
   // The first runner starts with one weapon that suits them.
@@ -150,34 +151,6 @@ export function rollItem(back: number, st: Stats = stats(), rnd: () => number = 
     if (r <= 0) return pool[i];
   }
   return pool[0];
-}
-
-// ---------------------------------------------------------------- the fighter (sky)
-const SKY_KIND: Record<string, Kind> = {
-  radial: 'shot', beam: 'shot', stack: 'slash', diagonal: 'slash', randomRadial: 'slash', bigHoming: 'magic', dropTarget: 'magic',
-  orbit: 'orbit', orbitClose: 'orbit', placeBomb: 'aura', speedUp: 'beast', cdDown: 'beast', hpMaxUp: 'armor', dmgTakenDown: 'armor', regen: 'armor',
-  dmgUp: 'shot', bulletCount: 'slash', attackRangeUp: 'magic', pierceUp: 'shot', pickupRangeUp: 'aura', ceGainUp: 'aura',
-};
-export const skyKind = (d: Def): Kind => SKY_KIND[d.arch] ?? 'shot';
-export const slotPower = (s: Slot) => 8 + s.lv * 11;
-
-/** The four best parts, used when the player does not choose. */
-export function autoFighter(run: Run): string[] {
-  return [...run.slots].sort((a, b) => b.lv - a.lv).slice(0, 4).map((s) => s.def.id);
-}
-export interface FighterStats {
-  laser: number; spread: number; missile: number; bits: number; engine: number; pulse: number; armor: number;
-}
-export function fighterStats(run: Run): FighterStats {
-  const st: FighterStats = { laser: 0, spread: 0, missile: 0, bits: 0, engine: 0, pulse: 0, armor: 0 };
-  const map: Record<Kind, keyof FighterStats> = {
-    shot: 'laser', slash: 'spread', magic: 'missile', orbit: 'bits', beast: 'engine', aura: 'pulse', armor: 'armor',
-  };
-  for (const id of run.fighter) {
-    const s = run.slots.find((x) => x.def.id === id);
-    if (s) st[map[skyKind(s.def)]] += slotPower(s);
-  }
-  return st;
 }
 
 export const totalTime = (run: Run) => run.splits.reduce((a, b) => a + b, 0);

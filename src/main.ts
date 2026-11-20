@@ -17,7 +17,7 @@ import type { Host, Stage, StageResult } from './stages/stage';
 import { treeScreen } from './ui/tree';
 import { createHud } from './ui/hud';
 import {
-  clearCard, goalScreen, hangarScreen, initScreens, introCard, levelUpScreen, outScreen, pauseScreen, resultScreen, screenLayer, selectScreen, titleScreen,
+  clearCard, goalScreen, initScreens, introCard, levelUpScreen, outScreen, pauseScreen, resultScreen, screenLayer, selectScreen, titleScreen, tuneScreen,
 } from './ui/screens';
 
 const app = document.getElementById('app')!;
@@ -90,7 +90,8 @@ document.addEventListener('visibilitychange', () => {
 
 async function playStage(run: Run, index: number): Promise<'done' | 'restart' | 'quit'> {
   const id = STAGES[index];
-  if (id === 'sky') await hangarScreen(run, debug.quick);
+  // the hangar's clock is part of the race: what is spent deciding is added to the sky's time
+  const tuned = id === 'sky' ? await tuneScreen(run, debug.quick) : 0;
   const host: Host = {
     run, seed: COURSE_SEED, mount, hud, bot: debug.bot,
     pick: (r) => levelUpScreen(r, debug.bot),
@@ -100,7 +101,7 @@ async function playStage(run: Run, index: number): Promise<'done' | 'restart' | 
   stage = await makeStage(id, host);
   hud.show(id, run.splits);
   hud.clock(0, baseTime);
-  hud.slots(run.slots);
+  hud.slots(id === 'sky' ? [] : run.slots);
   if (id === 'land') host.items(run);
   playBgm(id);
   setPad(true, PAD[id][0], PAD[id][1]);
@@ -115,7 +116,7 @@ async function playStage(run: Run, index: number): Promise<'done' | 'restart' | 
   (window as unknown as { __ft: unknown }).__ft = (stage as unknown as { finishTimes?: number[] }).finishTimes;
   (window as unknown as { __log: unknown[] }).__log.push({ stage: id, time: Math.round(stage.time * 10) / 10, result: lastResult, kills: run.kills, lv: run.level, downs: run.downs });
   if (result === 'done') {
-    run.splits[index] = stage.time;
+    run.splits[index] = stage.time + tuned;
     hud.clock(stage.time, baseTime + stage.time);
     if (!outro.shown && (!lastResult || lastResult.qualified)) await clearCard(index, run, lastResult ?? undefined);
   }
