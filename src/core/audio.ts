@@ -11,6 +11,8 @@ let bgm: HTMLAudioElement | null = null;
 let bgmKey = '';
 let unlocked = false;
 const lastPlayed = new Map<string, number>();
+/** The page is out of sight: another app or tab in front, the screen off, the browser closed. */
+const pageHidden = (): boolean => typeof document !== 'undefined' && document.visibilityState === 'hidden';
 
 function ac(): AudioContext | null {
   if (ctx) return ctx;
@@ -46,7 +48,7 @@ export function unlockAudio(): void {
   const c = ac();
   if (c && c.state === 'suspended') void c.resume();
   for (const k of Object.keys(cat.se)) void load(k);
-  if (bgmKey && bgm) void bgm.play().catch(() => undefined);
+  if (bgmKey && bgm && !pageHidden()) void bgm.play().catch(() => undefined);
 }
 
 export function playBgm(key: string, volume = 0.45): void {
@@ -67,7 +69,7 @@ export function playBgm(key: string, volume = 0.45): void {
     bgm.volume = volume * (muffled ? 0.55 : 1);
     route(bgm);
     bgm.muted = save().mute;
-    if (unlocked) void bgm.play().catch(() => undefined);
+    if (unlocked && !pageHidden()) void bgm.play().catch(() => undefined); // out of sight: watchPage starts it on return
   } catch {
     bgm = null;
   }
@@ -237,3 +239,35 @@ export function sfx(name: keyof typeof SFX | string, minGap = 0.04): void {
   lastPlayed.set(name, now);
   SFX[name]?.();
 }
+
+/**
+ * Silence while the page is out of sight, and pick the music up again on return. The browser (or the app
+ * around it) does not stop a page's own sound when it goes to the background: an <audio> keeps playing.
+ */
+function watchPage(): void {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return;
+  const hide = (): void => {
+    try {
+      bgm?.pause();
+      void ctx?.suspend().catch(() => undefined);
+    } catch {
+      /* ignore */
+    }
+  };
+  const show = (): void => {
+    if (pageHidden() || !unlocked) return;
+    try {
+      void ctx?.resume().catch(() => undefined);
+      if (bgm && bgmKey && bgm.paused) void bgm.play().catch(() => undefined);
+    } catch {
+      /* ignore */
+    }
+  };
+  document.addEventListener('visibilitychange', () => (pageHidden() ? hide() : show()));
+  window.addEventListener('pagehide', hide);
+  // back/forward cache: the page may come back without a visibilitychange
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) show();
+  });
+}
+watchPage();
